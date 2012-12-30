@@ -358,7 +358,7 @@ static VALUE nogvl_use_result(void *ptr) {
  */
 static VALUE rb_mysql_client_async_result(VALUE self) {
   MYSQL_RES * result;
-  VALUE resultObj;
+  VALUE resultObj, opts;
 #ifdef HAVE_RUBY_ENCODING_H
   mysql2_result_wrapper * result_wrapper;
 #endif
@@ -393,7 +393,9 @@ static VALUE rb_mysql_client_async_result(VALUE self) {
 
   resultObj = rb_mysql_result_to_obj(result);
   /* pass-through query options for result construction later */
-  rb_iv_set(resultObj, "@query_options", rb_hash_dup(rb_iv_get(self, "@current_query_options")));
+  RB_GC_GUARD(opts);
+  opts = rb_hash_dup(rb_iv_get(self, "@current_query_options"));
+  rb_iv_set(resultObj, "@query_options", opts);
 
 #ifdef HAVE_RUBY_ENCODING_H
   GetMysql2Result(resultObj, result_wrapper);
@@ -543,10 +545,12 @@ static VALUE rb_mysql_client_query(int argc, VALUE * argv, VALUE self) {
   REQUIRE_CONNECTED(wrapper);
   args.mysql = wrapper->client;
 
-  rb_iv_set(self, "@current_query_options", rb_hash_dup(rb_iv_get(self, "@query_options")));
-  current = rb_iv_get(self, "@current_query_options");
+  RB_GC_GUARD(current);
+  current = rb_hash_dup(rb_iv_get(self, "@query_options"));
+  rb_iv_set(self, "@current_query_options", current);
+
   if (rb_scan_args(argc, argv, "11", &args.sql, &opts) == 2) {
-    opts = rb_funcall(current, intern_merge_bang, 1, opts);
+    rb_funcall(current, intern_merge_bang, 1, opts);
 
     if (rb_hash_aref(current, sym_async) == Qtrue) {
       async = 1;
@@ -923,7 +927,7 @@ static VALUE rb_mysql_client_next_result(VALUE self)
 static VALUE rb_mysql_client_store_result(VALUE self)
 {
   MYSQL_RES * result;
-  VALUE resultObj;
+  VALUE resultObj, opts;
 #ifdef HAVE_RUBY_ENCODING_H
   mysql2_result_wrapper * result_wrapper;
 #endif
@@ -942,7 +946,9 @@ static VALUE rb_mysql_client_store_result(VALUE self)
 
   resultObj = rb_mysql_result_to_obj(result);
   /* pass-through query options for result construction later */
-  rb_iv_set(resultObj, "@query_options", rb_hash_dup(rb_iv_get(self, "@current_query_options")));
+  RB_GC_GUARD(opts);
+  opts = rb_hash_dup(rb_iv_get(self, "@current_query_options"));
+  rb_iv_set(resultObj, "@query_options", opts);
 
 #ifdef HAVE_RUBY_ENCODING_H
   GetMysql2Result(resultObj, result_wrapper);
