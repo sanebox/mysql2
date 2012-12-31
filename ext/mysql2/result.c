@@ -1,8 +1,6 @@
 #include <mysql2_ext.h>
 #include <stdint.h>
 
-#include "mysql_enc_to_ruby.h"
-
 #ifdef HAVE_RUBY_ENCODING_H
 static rb_encoding *binaryEncoding;
 #endif
@@ -57,6 +55,7 @@ static ID intern_new, intern_utc, intern_local, intern_localtime, intern_local_o
 static VALUE sym_symbolize_keys, sym_as, sym_array, sym_database_timezone, sym_application_timezone,
           sym_local, sym_utc, sym_cast_booleans, sym_cache_rows, sym_cast, sym_stream, sym_name;
 static ID intern_merge;
+static VALUE charset_map, charset_code_map;
 
 static void rb_mysql_result_mark(void * wrapper) {
   mysql2_result_wrapper * w = wrapper;
@@ -145,19 +144,16 @@ static VALUE mysql2_set_field_string_encoding(VALUE val, MYSQL_FIELD field, rb_e
     rb_enc_associate(val, binaryEncoding);
   } else {
     /* lookup the encoding configured on this field */
-    const char *enc_name;
-    int enc_index;
-
-    enc_name = mysql2_mysql_enc_to_rb[field.charsetnr-1];
-    if (enc_name != NULL) {
+    VALUE new_encoding_code = rb_hash_aref(charset_code_map, INT2NUM(field.charsetnr));
+    VALUE new_encoding = rb_hash_aref(charset_map, rb_hash_aref(new_encoding_code, sym_name));
+    if (!NIL_P(new_encoding)) {
       /* use the field encoding we were able to match */
-      enc_index = rb_enc_find_index(enc_name);
-      rb_enc_set_index(val, enc_index);
+      rb_encoding *enc = rb_to_encoding(new_encoding);
+      rb_enc_associate(val, enc);
     } else {
       /* otherwise fall-back to the connection's encoding */
       rb_enc_associate(val, conn_enc);
     }
-
     if (default_internal_enc) {
       val = rb_str_export_to_enc(val, default_internal_enc);
     }
@@ -585,6 +581,11 @@ void init_mysql2_result() {
   rb_define_method(cMysql2Result, "fields", rb_mysql_result_fetch_fields, 0);
   rb_define_method(cMysql2Result, "count", rb_mysql_result_count, 0);
   rb_define_alias(cMysql2Result, "size", "count");
+
+#ifdef HAVE_RUBY_ENCODING_H
+  charset_map = rb_const_get(mMysql2, rb_intern("CHARSET_MAP"));
+  charset_code_map = rb_const_get(mMysql2, rb_intern("MYSQL_CHARSET_MAP"));
+#endif
 
   intern_new          = rb_intern("new");
   intern_utc          = rb_intern("utc");
