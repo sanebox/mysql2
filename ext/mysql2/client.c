@@ -375,8 +375,9 @@ static VALUE rb_mysql_client_async_result(VALUE self) {
     return rb_raise_mysql2_error(wrapper);
   }
 
-  VALUE is_streaming = rb_hash_aref(rb_iv_get(self, "@current_query_options"), sym_stream);
-  if(is_streaming == Qtrue) {
+  opts = rb_iv_get(self, "@current_query_options");
+  Check_Type(opts, T_HASH);
+  if(rb_hash_aref(opts, sym_stream) == Qtrue) {
     result = (MYSQL_RES *)rb_thread_blocking_region(nogvl_use_result, wrapper, RUBY_UBF_IO, 0);
   } else {
     result = (MYSQL_RES *)rb_thread_blocking_region(nogvl_store_result, wrapper, RUBY_UBF_IO, 0);
@@ -391,10 +392,11 @@ static VALUE rb_mysql_client_async_result(VALUE self) {
     return Qnil;
   }
 
-  resultObj = rb_mysql_result_to_obj(result);
+  RB_GC_GUARD(resultObj) = rb_mysql_result_to_obj(result);
   /* pass-through query options for result construction later */
-  RB_GC_GUARD(opts);
-  opts = rb_hash_dup(rb_iv_get(self, "@current_query_options"));
+  opts = rb_iv_get(self, "@current_query_options");
+  Check_Type(opts, T_HASH);
+  RB_GC_GUARD(opts) = rb_hash_dup(opts);
   rb_iv_set(resultObj, "@query_options", opts);
 
 #ifdef HAVE_RUBY_ENCODING_H
@@ -545,8 +547,9 @@ static VALUE rb_mysql_client_query(int argc, VALUE * argv, VALUE self) {
   REQUIRE_CONNECTED(wrapper);
   args.mysql = wrapper->client;
 
-  RB_GC_GUARD(current);
-  current = rb_hash_dup(rb_iv_get(self, "@query_options"));
+  current = rb_iv_get(self, "@query_options");
+  Check_Type(current, T_HASH);
+  RB_GC_GUARD(current) = rb_hash_dup(current);
   rb_iv_set(self, "@current_query_options", current);
 
   if (rb_scan_args(argc, argv, "11", &args.sql, &opts) == 2) {
@@ -946,8 +949,9 @@ static VALUE rb_mysql_client_store_result(VALUE self)
 
   resultObj = rb_mysql_result_to_obj(result);
   /* pass-through query options for result construction later */
-  RB_GC_GUARD(opts);
-  opts = rb_hash_dup(rb_iv_get(self, "@current_query_options"));
+  opts = rb_iv_get(self, "@current_query_options");
+  Check_Type(opts, T_HASH);
+  RB_GC_GUARD(opts) = rb_hash_dup(opts);
   rb_iv_set(resultObj, "@query_options", opts);
 
 #ifdef HAVE_RUBY_ENCODING_H

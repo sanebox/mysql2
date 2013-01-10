@@ -131,6 +131,7 @@ static VALUE rb_mysql_result_fetch_field(VALUE self, unsigned int idx, short int
       }
 #endif
     }
+    RB_GC_GUARD(rb_field);
     rb_ary_store(wrapper->fields, idx, rb_field);
   }
 
@@ -188,9 +189,9 @@ static VALUE rb_mysql_result_fetch_row(VALUE self, ID db_timezone, ID app_timezo
   }
 
   if (asArray) {
-    rowVal = rb_ary_new2(wrapper->numberOfFields);
+    RB_GC_GUARD(rowVal) = rb_ary_new2(wrapper->numberOfFields);
   } else {
-    rowVal = rb_hash_new();
+    RB_GC_GUARD(rowVal) = rb_hash_new();
   }
   fieldLengths = mysql_fetch_lengths(wrapper->result);
   if (wrapper->fields == Qnil) {
@@ -199,7 +200,8 @@ static VALUE rb_mysql_result_fetch_row(VALUE self, ID db_timezone, ID app_timezo
   }
 
   for (i = 0; i < wrapper->numberOfFields; i++) {
-    VALUE field = rb_mysql_result_fetch_field(self, i, symbolizeKeys);
+    VALUE field;
+    RB_GC_GUARD(field) = rb_mysql_result_fetch_field(self, i, symbolizeKeys);
     if (row[i]) {
       VALUE val = Qnil;
       enum enum_field_types type = fields[i].type;
@@ -347,6 +349,7 @@ static VALUE rb_mysql_result_fetch_row(VALUE self, ID db_timezone, ID app_timezo
           break;
         }
       }
+      RB_GC_GUARD(val);
       if (asArray) {
         rb_ary_push(rowVal, val);
       } else {
@@ -371,7 +374,8 @@ static VALUE rb_mysql_result_fetch_fields(VALUE self) {
 
   GetMysql2Result(self, wrapper);
 
-  defaults = rb_iv_get(self, "@query_options");
+  RB_GC_GUARD(defaults) = rb_iv_get(self, "@query_options");
+  Check_Type(defaults, T_HASH);
   if (rb_hash_aref(defaults, sym_symbolize_keys) == Qtrue) {
     symbolizeKeys = 1;
   }
@@ -400,7 +404,8 @@ static VALUE rb_mysql_result_each(int argc, VALUE * argv, VALUE self) {
 
   GetMysql2Result(self, wrapper);
 
-  defaults = rb_iv_get(self, "@query_options");
+  RB_GC_GUARD(defaults) = rb_iv_get(self, "@query_options");
+  Check_Type(defaults, T_HASH);
   if (rb_scan_args(argc, argv, "01&", &opts, &block) == 1) {
     opts = rb_funcall(defaults, intern_merge, 1, opts);
   } else {
@@ -479,7 +484,7 @@ static VALUE rb_mysql_result_each(int argc, VALUE * argv, VALUE self) {
       fields = mysql_fetch_fields(wrapper->result);
 
       do {
-        row = rb_mysql_result_fetch_row(self, db_timezone, app_timezone, symbolizeKeys, asArray, castBool, cast, fields);
+        RB_GC_GUARD(row) = rb_mysql_result_fetch_row(self, db_timezone, app_timezone, symbolizeKeys, asArray, castBool, cast, fields);
 
         if (block != Qnil && row != Qnil) {
           rb_yield(row);
@@ -509,9 +514,9 @@ static VALUE rb_mysql_result_each(int argc, VALUE * argv, VALUE self) {
       for (i = 0; i < wrapper->numberOfRows; i++) {
         VALUE row;
         if (cacheRows && i < rowsProcessed) {
-          row = rb_ary_entry(wrapper->rows, i);
+          RB_GC_GUARD(row) = rb_ary_entry(wrapper->rows, i);
         } else {
-          row = rb_mysql_result_fetch_row(self, db_timezone, app_timezone, symbolizeKeys, asArray, castBool, cast, fields);
+          RB_GC_GUARD(row) = rb_mysql_result_fetch_row(self, db_timezone, app_timezone, symbolizeKeys, asArray, castBool, cast, fields);
           if (cacheRows) {
             rb_ary_store(wrapper->rows, i, row);
           }
@@ -557,7 +562,7 @@ static VALUE rb_mysql_result_count(VALUE self) {
 VALUE rb_mysql_result_to_obj(MYSQL_RES * r) {
   VALUE obj;
   mysql2_result_wrapper * wrapper;
-  obj = Data_Make_Struct(cMysql2Result, mysql2_result_wrapper, rb_mysql_result_mark, rb_mysql_result_free, wrapper);
+  RB_GC_GUARD(obj) = Data_Make_Struct(cMysql2Result, mysql2_result_wrapper, rb_mysql_result_mark, rb_mysql_result_free, wrapper);
   wrapper->numberOfFields = 0;
   wrapper->numberOfRows = 0;
   wrapper->lastRowProcessed = 0;
