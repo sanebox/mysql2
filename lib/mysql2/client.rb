@@ -1,6 +1,6 @@
 module Mysql2
   class Client
-    attr_reader :query_options
+    attr_reader :query_options, :read_timeout
     @@default_query_options = {
       :as => :hash,                   # the type of object you want each row back as; also supports :array (an array of values)
       :async => false,                # don't wait for a result after sending the query, you'll have to monitor the socket yourself then eventually call Mysql2::Client#async_result
@@ -15,16 +15,17 @@ module Mysql2
 
     def initialize(opts = {})
       opts = Mysql2::Util.key_hash_as_symbols( opts )
+      @read_timeout = nil
       @query_options = @@default_query_options.dup
       @query_options.merge! opts
 
       initialize_ext
 
       # Set MySQL connection options (each one is a call to mysql_options())
-      [:reconnect, :connect_timeout, :local_infile, :read_timeout, :write_timeout].each do |key|
+      [:reconnect, :connect_timeout, :local_infile, :read_timeout, :write_timeout, :secure_auth].each do |key|
         next unless opts.key?(key)
         case key
-        when :reconnect, :local_infile
+        when :reconnect, :local_infile, :secure_auth
           send(:"#{key}=", !!opts[key])
         when :connect_timeout, :read_timeout, :write_timeout
           send(:"#{key}=", opts[key].to_i)
@@ -36,7 +37,8 @@ module Mysql2
       # force the encoding to utf8
       self.charset_name = opts[:encoding] || 'utf8'
 
-      ssl_set(*opts.values_at(:sslkey, :sslcert, :sslca, :sslcapath, :sslcipher))
+      ssl_options = opts.values_at(:sslkey, :sslcert, :sslca, :sslcapath, :sslcipher)
+      ssl_set(*ssl_options) if ssl_options.any?
 
       if [:user,:pass,:hostname,:dbname,:db,:sock].any?{|k| @query_options.has_key?(k) }
         warn "============= WARNING FROM mysql2 ============="
@@ -58,6 +60,14 @@ module Mysql2
 
     def self.default_query_options
       @@default_query_options
+    end
+
+    def query_info
+      info = query_info_string
+      return {} unless info
+      info_hash = {}
+      info.split.each_slice(2) { |s| info_hash[s[0].downcase.delete(':').to_sym] = s[1].to_i }
+      info_hash
     end
 
     private

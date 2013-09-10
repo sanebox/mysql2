@@ -2,10 +2,6 @@
 require 'spec_helper'
 
 describe Mysql2::Client do
-  before(:each) do
-    @client = Mysql2::Client.new DatabaseCredentials['root']
-  end
-
   it "should raise an exception upon connection failure" do
     lambda {
       # The odd local host IP address forces the mysql client library to
@@ -17,17 +13,17 @@ describe Mysql2::Client do
   if defined? Encoding
     it "should raise an exception on create for invalid encodings" do
       lambda {
-        c = Mysql2::Client.new(DatabaseCredentials['root'].merge(:encoding => "fake"))
+        Mysql2::Client.new(DatabaseCredentials['root'].merge(:encoding => "fake"))
       }.should raise_error(Mysql2::Error)
     end
 
     it "should not raise an exception on create for a valid encoding" do
       lambda {
-        c = Mysql2::Client.new(DatabaseCredentials['root'].merge(:encoding => "utf8"))
+        Mysql2::Client.new(DatabaseCredentials['root'].merge(:encoding => "utf8"))
       }.should_not raise_error(Mysql2::Error)
 
       lambda {
-        c = Mysql2::Client.new(DatabaseCredentials['root'].merge(:encoding => "big5"))
+        Mysql2::Client.new(DatabaseCredentials['root'].merge(:encoding => "big5"))
       }.should_not raise_error(Mysql2::Error)
     end
   end
@@ -81,11 +77,15 @@ describe Mysql2::Client do
     results = ssl_client.query("SHOW STATUS WHERE Variable_name = \"Ssl_version\" OR Variable_name = \"Ssl_cipher\"").to_a
     results[0]['Variable_name'].should eql('Ssl_cipher')
     results[0]['Value'].should_not be_nil
-    results[0]['Value'].class.should eql(String)
+    results[0]['Value'].should be_kind_of(String)
+    results[0]['Value'].should_not be_empty
 
     results[1]['Variable_name'].should eql('Ssl_version')
     results[1]['Value'].should_not be_nil
-    results[1]['Value'].class.should eql(String)
+    results[1]['Value'].should be_kind_of(String)
+    results[1]['Value'].should_not be_empty
+
+    ssl_client.close
   end
 
   it "should respond to #close" do
@@ -109,21 +109,46 @@ describe Mysql2::Client do
 
   context "#warning_count" do
     context "when no warnings" do
-      before(:each) do
-        @client.query('select 1')
-      end
       it "should 0" do
+        @client.query('select 1')
         @client.warning_count.should == 0
       end
     end
     context "when has a warnings" do
-      before(:each) do
+      it "should > 0" do
         # "the statement produces extra information that can be viewed by issuing a SHOW WARNINGS"
         # http://dev.mysql.com/doc/refman/5.0/en/explain-extended.html
         @client.query("explain extended select 1")
-      end
-      it "should > 0" do
         @client.warning_count.should > 0
+      end
+    end
+  end
+
+  it "should respond to #query_info" do
+    @client.should respond_to(:query_info)
+  end
+
+  context "#query_info" do
+    context "when no info present" do
+      it "should 0" do
+        @client.query('select 1')
+        @client.query_info.should be_empty
+        @client.query_info_string.should be_nil
+      end
+    end
+    context "when has some info" do
+      it "should retrieve it" do
+        @client.query "USE test"
+        @client.query "CREATE TABLE IF NOT EXISTS infoTest (`id` int(11) NOT NULL AUTO_INCREMENT, blah INT(11), PRIMARY KEY (`id`))"
+
+        # http://dev.mysql.com/doc/refman/5.0/en/mysql-info.html says
+        # # Note that mysql_info() returns a non-NULL value for INSERT ... VALUES only for the multiple-row form of the statement (that is, only if multiple value lists are specified).
+        @client.query("INSERT INTO infoTest (blah) VALUES (1234),(4535)")
+
+        @client.query_info.should  eql({:records => 2, :duplicates => 0, :warnings => 0})
+        @client.query_info_string.should eq('Records: 2  Duplicates: 0  Warnings: 0')
+
+        @client.query "DROP TABLE infoTest"
       end
     end
   end
@@ -148,7 +173,7 @@ describe Mysql2::Client do
 
   context "#query" do
     it "should let you query again if iterating is finished when streaming" do
-      @client.query("SELECT 1 UNION SELECT 2", :stream => true, :cache_rows => false).each {}
+      @client.query("SELECT 1 UNION SELECT 2", :stream => true, :cache_rows => false).each.to_a
 
       expect {
         @client.query("SELECT 1 UNION SELECT 2", :stream => true, :cache_rows => false)
@@ -239,30 +264,32 @@ describe Mysql2::Client do
         }.should raise_error(Mysql2::Error)
       end
 
-      # XXX this test is not deterministic (because Unix signal handling is not)
-      # and may fail on a loaded system
-      it "should run signal handlers while waiting for a response" do
-        mark = {}
-        trap(:USR1) { mark[:USR1] = Time.now }
-        begin
-          mark[:START] = Time.now
-          pid = fork do
-            sleep 1 # wait for client "SELECT sleep(2)" query to start
-            Process.kill(:USR1, Process.ppid)
-            sleep # wait for explicit kill to prevent GC disconnect
+      if !defined? Rubinius
+        # XXX this test is not deterministic (because Unix signal handling is not)
+        # and may fail on a loaded system
+        it "should run signal handlers while waiting for a response" do
+          mark = {}
+          trap(:USR1) { mark[:USR1] = Time.now }
+          begin
+            mark[:START] = Time.now
+            pid = fork do
+              sleep 1 # wait for client "SELECT sleep(2)" query to start
+              Process.kill(:USR1, Process.ppid)
+              sleep # wait for explicit kill to prevent GC disconnect
+            end
+            @client.query("SELECT sleep(2)")
+            mark[:END] = Time.now
+            mark.include?(:USR1).should be_true
+            (mark[:USR1] - mark[:START]).should >= 1
+            (mark[:USR1] - mark[:START]).should < 1.3
+            (mark[:END] - mark[:USR1]).should > 0.9
+            (mark[:END] - mark[:START]).should >= 2
+            (mark[:END] - mark[:START]).should < 2.3
+            Process.kill(:TERM, pid)
+            Process.waitpid2(pid)
+          ensure
+            trap(:USR1, 'DEFAULT')
           end
-          @client.query("SELECT sleep(2)")
-          mark[:END] = Time.now
-          mark.include?(:USR1).should be_true
-          (mark[:USR1] - mark[:START]).should >= 1
-          (mark[:USR1] - mark[:START]).should < 1.1
-          (mark[:END] - mark[:USR1]).should > 0.9
-          (mark[:END] - mark[:START]).should >= 2
-          (mark[:END] - mark[:START]).should < 2.1
-          Process.kill(:TERM, pid)
-          Process.waitpid2(pid)
-        ensure
-          trap(:USR1, 'DEFAULT')
         end
       end
 
@@ -381,12 +408,12 @@ describe Mysql2::Client do
       end
 
       it "returns multiple result sets" do
-        @multi_client.query( "select 1 as 'set_1'; select 2 as 'set_2'").first.should == { 'set_1' => 1 }
+        @multi_client.query( "select 1 as 'set_1'; select 2 as 'set_2'").first.should eql({ 'set_1' => 1 })
 
-        @multi_client.next_result.should == true
-        @multi_client.store_result.first.should == { 'set_2' => 2 }
+        @multi_client.next_result.should be_true
+        @multi_client.store_result.first.should eql({ 'set_2' => 2 })
 
-        @multi_client.next_result.should == false
+        @multi_client.next_result.should be_false
       end
 
       it "does not interfere with other statements" do
@@ -415,12 +442,12 @@ describe Mysql2::Client do
 
       it "#more_results? should work" do
         @multi_client.query( "select 1 as 'set_1'; select 2 as 'set_2'")
-        @multi_client.more_results?.should == true
+        @multi_client.more_results?.should be_true
 
         @multi_client.next_result
         @multi_client.store_result
 
-        @multi_client.more_results?.should == false
+        @multi_client.more_results?.should be_false
       end
     end
   end
@@ -583,11 +610,11 @@ describe Mysql2::Client do
 
   it "should raise a Mysql2::Error exception upon connection failure" do
     lambda {
-      bad_client = Mysql2::Client.new :host => "localhost", :username => 'asdfasdf8d2h', :password => 'asdfasdfw42'
+      Mysql2::Client.new :host => "localhost", :username => 'asdfasdf8d2h', :password => 'asdfasdfw42'
     }.should raise_error(Mysql2::Error)
 
     lambda {
-      good_client = Mysql2::Client.new DatabaseCredentials['root']
+      Mysql2::Client.new DatabaseCredentials['root']
     }.should_not raise_error(Mysql2::Error)
   end
 

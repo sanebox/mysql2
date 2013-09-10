@@ -63,22 +63,33 @@ static void rb_mysql_result_mark(void * wrapper) {
     rb_gc_mark(w->fields);
     rb_gc_mark(w->rows);
     rb_gc_mark(w->encoding);
+    rb_gc_mark(w->client);
   }
 }
 
 /* this may be called manually or during GC */
 static void rb_mysql_result_free_result(mysql2_result_wrapper * wrapper) {
   if (wrapper && wrapper->resultFreed != 1) {
+    /* FIXME: this may call flush_use_result, which can hit the socket */
     mysql_free_result(wrapper->result);
     wrapper->resultFreed = 1;
   }
 }
 
 /* this is called during GC */
-static void rb_mysql_result_free(void * wrapper) {
-  mysql2_result_wrapper * w = wrapper;
-  /* FIXME: this may call flush_use_result, which can hit the socket */
-  rb_mysql_result_free_result(w);
+static void rb_mysql_result_free(void *ptr) {
+  mysql2_result_wrapper * wrapper = ptr;
+  rb_mysql_result_free_result(wrapper);
+
+  // If the GC gets to client first it will be nil
+  if (wrapper->client != Qnil) {
+    wrapper->client_wrapper->refcount--;
+    if (wrapper->client_wrapper->refcount == 0) {
+      xfree(wrapper->client_wrapper->client);
+      xfree(wrapper->client_wrapper);
+    }
+  }
+
   xfree(wrapper);
 }
 
@@ -113,15 +124,18 @@ static VALUE rb_mysql_result_fetch_field(VALUE self, unsigned int idx, short int
 
     field = mysql_fetch_field_direct(wrapper->result, idx);
     if (symbolize_keys) {
-      VALUE colStr;
       char buf[field->name_length+1];
       memcpy(buf, field->name, field->name_length);
       buf[field->name_length] = 0;
+
+#ifdef HAVE_RB_INTERN3
+      rb_field = rb_intern3(buf, field->name_length, rb_utf8_encoding());
+      rb_field = ID2SYM(rb_field);
+#else
+      VALUE colStr;
       colStr = rb_str_new2(buf);
-#ifdef HAVE_RUBY_ENCODING_H
-      rb_enc_associate(colStr, rb_utf8_encoding());
-#endif
       rb_field = ID2SYM(rb_to_id(colStr));
+#endif
     } else {
       rb_field = rb_str_new(field->name, field->name_length);
 #ifdef HAVE_RUBY_ENCODING_H
@@ -141,6 +155,9 @@ static VALUE rb_mysql_result_fetch_field(VALUE self, unsigned int idx, short int
 static VALUE mysql2_set_field_string_encoding(VALUE val, MYSQL_FIELD field, rb_encoding *default_internal_enc, rb_encoding *conn_enc) {
   /* if binary flag is set, respect it's wishes */
   if (field.flags & BINARY_FLAG && field.charsetnr == 63) {
+    rb_enc_associate(val, binaryEncoding);
+  } else if (!field.charsetnr) {
+    /* MySQL 4.x may not provide an encoding, binary will get the bytes through */
     rb_enc_associate(val, binaryEncoding);
   } else {
     /* lookup the encoding configured on this field */
@@ -219,7 +236,11 @@ static VALUE rb_mysql_result_fetch_row(VALUE self, ID db_timezone, ID app_timezo
           val = Qnil;
           break;
         case MYSQL_TYPE_BIT:        /* BIT field (MySQL 5.0.3 and up) */
-          val = rb_str_new(row[i], fieldLengths[i]);
+          if (castBool && fields[i].length == 1) {
+            val = *row[i] == 1 ? Qtrue : Qfalse;
+          }else{
+            val = rb_str_new(row[i], fieldLengths[i]);
+          }
           break;
         case MYSQL_TYPE_TINY:       /* TINYINT field */
           if (castBool && fields[i].length == 1) {
@@ -372,6 +393,7 @@ static VALUE rb_mysql_result_fetch_fields(VALUE self) {
   GetMysql2Result(self, wrapper);
 
   defaults = rb_iv_get(self, "@query_options");
+  Check_Type(defaults, T_HASH);
   if (rb_hash_aref(defaults, sym_symbolize_keys) == Qtrue) {
     symbolizeKeys = 1;
   }
@@ -401,6 +423,7 @@ static VALUE rb_mysql_result_each(int argc, VALUE * argv, VALUE self) {
   GetMysql2Result(self, wrapper);
 
   defaults = rb_iv_get(self, "@query_options");
+  Check_Type(defaults, T_HASH);
   if (rb_scan_args(argc, argv, "01&", &opts, &block) == 1) {
     opts = rb_funcall(defaults, intern_merge, 1, opts);
   } else {
@@ -554,7 +577,7 @@ static VALUE rb_mysql_result_count(VALUE self) {
 }
 
 /* Mysql2::Result */
-VALUE rb_mysql_result_to_obj(MYSQL_RES * r) {
+VALUE rb_mysql_result_to_obj(VALUE client, VALUE encoding, VALUE options, MYSQL_RES *r) {
   VALUE obj;
   mysql2_result_wrapper * wrapper;
   obj = Data_Make_Struct(cMysql2Result, mysql2_result_wrapper, rb_mysql_result_mark, rb_mysql_result_free, wrapper);
@@ -565,9 +588,16 @@ VALUE rb_mysql_result_to_obj(MYSQL_RES * r) {
   wrapper->result = r;
   wrapper->fields = Qnil;
   wrapper->rows = Qnil;
-  wrapper->encoding = Qnil;
+  wrapper->encoding = encoding;
   wrapper->streamingComplete = 0;
+  wrapper->client = client;
+  wrapper->client_wrapper = DATA_PTR(client);
+  wrapper->client_wrapper->refcount++;
+
   rb_obj_call_init(obj, 0, NULL);
+
+  rb_iv_set(obj, "@query_options", options);
+
   return obj;
 }
 

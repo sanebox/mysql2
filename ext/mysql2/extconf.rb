@@ -9,6 +9,7 @@ end
 have_func('rb_thread_blocking_region')
 have_func('rb_wait_for_single_fd')
 have_func('rb_hash_dup')
+have_func('rb_intern3')
 
 # borrowed from mysqlplus
 # http://github.com/oldmoe/mysqlplus/blob/master/ext/extconf.rb
@@ -29,11 +30,19 @@ GLOB = "{#{dirs.join(',')}}/{mysql_config,mysql_config5}"
 
 if RUBY_PLATFORM =~ /mswin|mingw/
   inc, lib = dir_config('mysql')
+
+  # Ruby versions not incorporating the mkmf fix at
+  # https://bugs.ruby-lang.org/projects/ruby-trunk/repository/revisions/39717
+  # do not properly search for lib directories, and must be corrected
+  unless lib && lib[-3, 3] == 'lib'
+    @libdir_basename = 'lib'
+    inc, lib = dir_config('mysql')
+  end
   exit 1 unless have_library("libmysql")
 elsif mc = (with_config('mysql-config') || Dir[GLOB].first) then
   mc = Dir[GLOB].first if mc == true
   ver = `#{mc} --version`.chomp.to_f
-  cflags = `#{mc} --cflags`.chomp
+  includes = `#{mc} --include`.chomp
   exit 1 if $? != 0
   libs = `#{mc} --libs_r`.chomp
   # MySQL 5.5 and above already have re-entrant code in libmysqlclient (no _r).
@@ -41,7 +50,7 @@ elsif mc = (with_config('mysql-config') || Dir[GLOB].first) then
     libs = `#{mc} --libs`.chomp
   end
   exit 1 if $? != 0
-  $CPPFLAGS += ' ' + cflags
+  $INCFLAGS += ' ' + includes
   $libs = libs + " " + $libs
 else
   inc, lib = dir_config('mysql', '/usr/local')
@@ -69,8 +78,13 @@ end
 if RbConfig::MAKEFILE_CONFIG['CC'] =~ /gcc/
   $CFLAGS << ' -Wall -funroll-loops'
 
-  if hard_mysql_path = $libs[%r{-L(/[^ ]+)}, 1]
-    $LDFLAGS << " -Wl,-rpath,#{hard_mysql_path}"
+  if libdir = $libs[%r{-L(/[^ ]+)}, 1]
+    # The following comment and test is borrowed from the Pg gem:
+    # Try to use runtime path linker option, even if RbConfig doesn't know about it.
+    # The rpath option is usually set implicit by dir_config(), but so far not on Mac OS X.
+    if RbConfig::CONFIG["RPATHFLAG"].to_s.empty? && try_link('int main() {return 0;}', " -Wl,-rpath,#{libdir}")
+      $LDFLAGS << " -Wl,-rpath,#{libdir}"
+    end
   end
 end
 
