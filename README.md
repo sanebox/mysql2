@@ -1,3 +1,7 @@
+# Hardcoded Latin1 → UTF-8 charset mapping
+
+This is the Mysql2 0.3.x branch with a hardcoded mapping of MySQL latin1 to Ruby UTF-8 charset. If you have a MySQL database with latin1 charset but utf-8 characters, you can use this to treat the strings as UTF-8 without having to fix your database encoding (very painful).
+
 # Mysql2 - A modern, simple and very fast MySQL library for Ruby - binding to libmysql
 
 Travis CI [![Travis CI Status](https://travis-ci.org/brianmario/mysql2.png)](https://travis-ci.org/brianmario/mysql2)
