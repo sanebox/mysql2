@@ -6,7 +6,6 @@
    we'll never modify the pointers we get back from RSTRING_PTR */
 #define RSTRING_NOT_MODIFIED
 #include <ruby.h>
-#include <fcntl.h>
 
 #ifndef HAVE_UINT
 #define HAVE_UINT
@@ -41,5 +40,6 @@ typedef unsigned int    uint;
 
 #include <client.h>
 #include <result.h>
+#include <infile.h>
 
 #endif

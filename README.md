@@ -10,9 +10,9 @@ It also forces the use of UTF-8 [or binary] for the connection [and all strings 
 
 The API consists of two classes:
 
-Mysql2::Client - your connection to the database
+`Mysql2::Client` - your connection to the database
 
-Mysql2::Result - returned from issuing a #query on the connection. It includes Enumerable.
+`Mysql2::Result` - returned from issuing a #query on the connection. It includes Enumerable.
 
 ## Installing
 ### OSX / Linux
@@ -66,7 +66,7 @@ files are. For example, if you unzipped the connector to c:\mysql-connector-c-6.
 the gem like this:
 
     gem install mysql2 -- --with-mysql-dir=c:\mysql-connector-c-6.1.1-win32
-    
+
 Finally, you must copy libmysql.dll from the lib subdirectory of your MySQL or MySQL connector directory into
 your ruby\bin directory. In the above example, libmysql.dll would be located at
 c:\mysql-connector-c-6.1.1-win32\lib .
@@ -119,8 +119,7 @@ end
 How about with symbolized keys?
 
 ``` ruby
-# NOTE: the :symbolize_keys and future options will likely move to the #query method soon
-client.query("SELECT * FROM users WHERE group='githubbers'").each(:symbolize_keys => true) do |row|
+client.query("SELECT * FROM users WHERE group='githubbers'", :symbolize_keys => true) do |row|
   # do something with row, it's ready to rock
 end
 ```
@@ -182,18 +181,43 @@ Mysql2::Client.new(
 
 ### Multiple result sets
 
-You can also retrieve multiple result sets. For this to work you need to connect with
-flags `Mysql2::Client::MULTI_STATEMENTS`. Using multiple result sets is normally used
-when calling stored procedures that return more than one result set
+You can also retrieve multiple result sets. For this to work you need to
+connect with flags `Mysql2::Client::MULTI_STATEMENTS`. Multiple result sets can
+be used with stored procedures that return more than one result set, and for
+bundling several SQL statements into a single call to `client.query`.
 
 ``` ruby
-client = Mysql2::Client.new(:host => "localhost", :username => "root", :flags => Mysql2::Client::MULTI_STATEMENTS )
-result = client.query( 'CALL sp_customer_list( 25, 10 )')
+client = Mysql2::Client.new(:host => "localhost", :username => "root", :flags => Mysql2::Client::MULTI_STATEMENTS)
+result = client.query('CALL sp_customer_list( 25, 10 )')
 # result now contains the first result set
-while ( client.next_result)
-    result = client.store_result
-    # result now contains the next result set
+while client.next_result
+  result = client.store_result
+  # result now contains the next result set
 end
+```
+
+Repeated calls to `client.next_result` will return true, false, or raise an
+exception if the respective query erred. When `client.next_result` returns true,
+call `client.store_result` to retrieve a result object. Exceptions are not
+raised until `client.next_result` is called to find the status of the respective
+query. Subsequent queries are not executed if an earlier query raised an
+exception. Subsequent calls to `client.next_result` will return false.
+
+``` ruby
+result = client.query('SELECT 1; SELECT 2; SELECT A; SELECT 3')
+p result.first
+
+while client.next_result
+  result = client.store_result
+  p result.first
+end
+```
+
+Yields:
+```
+{"1"=>1}
+{"2"=>2}
+next_result: Unknown column 'A' in 'field list' (Mysql2::Error)
 ```
 
 See https://gist.github.com/1367987 for using MULTI_STATEMENTS with Active Record.
@@ -274,11 +298,6 @@ Pass the `:as => :array` option to any of the above methods of configuration
 ### Array of Hashes
 
 The default result type is set to :hash, but you can override a previous setting to something else with :as => :hash
-
-### Others...
-
-I may add support for `:as => :csv` or even `:as => :json` to allow for *much* more efficient generation of those data types from result sets.
-If you'd like to see either of these (or others), open an issue and start bugging me about it ;)
 
 ### Timezones
 
@@ -420,7 +439,7 @@ For example, if you were to yield 4 rows from a 100 row dataset, only 4 hashes w
 Now say you were to iterate over that same collection again, this time yielding 15 rows - the 4 previous rows that had already been turned into ruby hashes would be pulled from an internal cache, then 11 more would be created and stored in that cache.
 Once the entire dataset has been converted into ruby objects, Mysql2::Result will free the Mysql C result object as it's no longer needed.
 
-This caching behavior can be disabled by setting the :cache_rows option to false.
+This caching behavior can be disabled by setting the `:cache_rows` option to false.
 
 As for field values themselves, I'm workin on it - but expect that soon.
 
