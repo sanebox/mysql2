@@ -54,7 +54,7 @@ describe Mysql2::Client do
       end
     end
     client = klient.new :flags => Mysql2::Client::FOUND_ROWS
-    (client.connect_args.last.last & Mysql2::Client::FOUND_ROWS).should be_true
+    (client.connect_args.last[6] & Mysql2::Client::FOUND_ROWS).should be_true
   end
 
   it "should default flags to (REMEMBER_OPTIONS, LONG_PASSWORD, LONG_FLAG, TRANSACTIONS, PROTOCOL_41, SECURE_CONNECTION)" do
@@ -66,12 +66,42 @@ describe Mysql2::Client do
       end
     end
     client = klient.new
-    (client.connect_args.last.last & (Mysql2::Client::REMEMBER_OPTIONS |
+    (client.connect_args.last[6] & (Mysql2::Client::REMEMBER_OPTIONS |
                                      Mysql2::Client::LONG_PASSWORD |
                                      Mysql2::Client::LONG_FLAG |
                                      Mysql2::Client::TRANSACTIONS |
                                      Mysql2::Client::PROTOCOL_41 |
                                      Mysql2::Client::SECURE_CONNECTION)).should be_true
+  end
+
+  it "should execute init command" do
+    options = DatabaseCredentials['root'].dup
+    options[:init_command] = "SET @something = 'setting_value';"
+    client = Mysql2::Client.new(options)
+    result = client.query("SELECT @something;")
+    result.first['@something'].should eq('setting_value')
+  end
+
+  it "should send init_command after reconnect" do
+    options = DatabaseCredentials['root'].dup
+    options[:init_command] = "SET @something = 'setting_value';"
+    options[:reconnect] = true
+    client = Mysql2::Client.new(options)
+
+    result = client.query("SELECT @something;")
+    result.first['@something'].should eq('setting_value')
+
+    # simulate a broken connection
+    begin
+      Timeout.timeout(1, Timeout::Error) do
+        client.query("SELECT sleep(2)")
+      end
+    rescue Timeout::Error
+    end
+    client.ping.should be_false
+
+    result = client.query("SELECT @something;")
+    result.first['@something'].should eq('setting_value')
   end
 
   it "should have a global default_query_options hash" do
@@ -418,9 +448,8 @@ describe Mysql2::Client do
       end
 
       it "should close the connection when an exception is raised" do
-        pending "Ruby 2.1 has changed Timeout behavior." if RUBY_VERSION =~ /2.1/
         begin
-          Timeout.timeout(1) do
+          Timeout.timeout(1, Timeout::Error) do
             @client.query("SELECT sleep(2)")
           end
         rescue Timeout::Error
@@ -432,10 +461,9 @@ describe Mysql2::Client do
       end
 
       it "should handle Timeouts without leaving the connection hanging if reconnect is true" do
-        pending "Ruby 2.1 has changed Timeout behavior." if RUBY_VERSION =~ /2.1/
         client = Mysql2::Client.new(DatabaseCredentials['root'].merge(:reconnect => true))
         begin
-          Timeout.timeout(1) do
+          Timeout.timeout(1, Timeout::Error) do
             client.query("SELECT sleep(2)")
           end
         rescue Timeout::Error
@@ -447,10 +475,9 @@ describe Mysql2::Client do
       end
 
       it "should handle Timeouts without leaving the connection hanging if reconnect is set to true after construction true" do
-        pending "Ruby 2.1 has changed Timeout behavior." if RUBY_VERSION =~ /2.1/
         client = Mysql2::Client.new(DatabaseCredentials['root'])
         begin
-          Timeout.timeout(1) do
+          Timeout.timeout(1, Timeout::Error) do
             client.query("SELECT sleep(2)")
           end
         rescue Timeout::Error
@@ -463,7 +490,7 @@ describe Mysql2::Client do
         client.reconnect = true
 
         begin
-          Timeout.timeout(1) do
+          Timeout.timeout(1, Timeout::Error) do
             client.query("SELECT sleep(2)")
           end
         rescue Timeout::Error

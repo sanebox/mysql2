@@ -1,11 +1,14 @@
 #include <mysql2_ext.h>
 
+#include <time.h>
 #include <errno.h>
 #ifndef _WIN32
 #include <sys/types.h>
 #include <sys/socket.h>
 #endif
+#ifndef _MSC_VER
 #include <unistd.h>
+#endif
 #include <fcntl.h>
 #include "wait_for_single_fd.h"
 
@@ -255,6 +258,7 @@ static VALUE allocate(VALUE klass) {
   wrapper->active_thread = Qnil;
   wrapper->server_version = 0;
   wrapper->reconnect_enabled = 0;
+  wrapper->connect_timeout = 0;
   wrapper->connected = 0; /* means that a database connection is open */
   wrapper->initialized = 0; /* means that that the wrapper is initialized */
   wrapper->refcount = 1;
@@ -324,6 +328,8 @@ static VALUE rb_mysql_info(VALUE self) {
 
 static VALUE rb_connect(VALUE self, VALUE user, VALUE pass, VALUE host, VALUE port, VALUE database, VALUE socket, VALUE flags) {
   struct nogvl_connect_args args;
+  time_t start_time, end_time;
+  unsigned int elapsed_time, connect_timeout;
   VALUE rv;
   GET_CLIENT(self);
 
@@ -336,12 +342,31 @@ static VALUE rb_connect(VALUE self, VALUE user, VALUE pass, VALUE host, VALUE po
   args.mysql = wrapper->client;
   args.client_flag = NUM2ULONG(flags);
 
+  if (wrapper->connect_timeout)
+    time(&start_time);
   rv = (VALUE) rb_thread_call_without_gvl(nogvl_connect, &args, RUBY_UBF_IO, 0);
   if (rv == Qfalse) {
-    while (rv == Qfalse && errno == EINTR && !mysql_errno(wrapper->client)) {
+    while (rv == Qfalse && errno == EINTR) {
+      if (wrapper->connect_timeout) {
+        time(&end_time);
+        /* avoid long connect timeout from system time changes */
+        if (end_time < start_time)
+          start_time = end_time;
+        elapsed_time = end_time - start_time;
+        /* avoid an early timeout due to time truncating milliseconds off the start time */
+        if (elapsed_time > 0)
+          elapsed_time--;
+        if (elapsed_time >= wrapper->connect_timeout)
+          break;
+        connect_timeout = wrapper->connect_timeout - elapsed_time;
+        mysql_options(wrapper->client, MYSQL_OPT_CONNECT_TIMEOUT, &connect_timeout);
+      }
       errno = 0;
       rv = (VALUE) rb_thread_call_without_gvl(nogvl_connect, &args, RUBY_UBF_IO, 0);
     }
+    /* restore the connect timeout for reconnecting */
+    if (wrapper->connect_timeout)
+      mysql_options(wrapper->client, MYSQL_OPT_CONNECT_TIMEOUT, &wrapper->connect_timeout);
     if (rv == Qfalse)
       return rb_raise_mysql2_error(wrapper);
   }
@@ -741,17 +766,17 @@ static VALUE _mysql_client_options(VALUE self, int opt, VALUE value) {
 
   switch(opt) {
     case MYSQL_OPT_CONNECT_TIMEOUT:
-      intval = NUM2INT(value);
+      intval = NUM2UINT(value);
       retval = &intval;
       break;
 
     case MYSQL_OPT_READ_TIMEOUT:
-      intval = NUM2INT(value);
+      intval = NUM2UINT(value);
       retval = &intval;
       break;
 
     case MYSQL_OPT_WRITE_TIMEOUT:
-      intval = NUM2INT(value);
+      intval = NUM2UINT(value);
       retval = &intval;
       break;
 
@@ -780,6 +805,11 @@ static VALUE _mysql_client_options(VALUE self, int opt, VALUE value) {
       retval  = charval;
       break;
 
+    case MYSQL_INIT_COMMAND:
+      charval = (const char *)StringValuePtr(value);
+      retval  = charval;
+      break;
+
     default:
       return Qfalse;
   }
@@ -790,9 +820,15 @@ static VALUE _mysql_client_options(VALUE self, int opt, VALUE value) {
   if (result != 0) {
     rb_warn("%s\n", mysql_error(wrapper->client));
   } else {
-    /* Special case for reconnect, this option is also stored in the wrapper struct */
-    if (opt == MYSQL_OPT_RECONNECT)
-      wrapper->reconnect_enabled = boolval;
+    /* Special case for options that are stored in the wrapper struct */
+    switch (opt) {
+      case MYSQL_OPT_RECONNECT:
+        wrapper->reconnect_enabled = boolval;
+        break;
+      case MYSQL_OPT_CONNECT_TIMEOUT:
+        wrapper->connect_timeout = intval;
+        break;
+    }
   }
 
   return (result == 0) ? Qtrue : Qfalse;
@@ -1164,6 +1200,10 @@ static VALUE set_read_default_group(VALUE self, VALUE value) {
   return _mysql_client_options(self, MYSQL_READ_DEFAULT_GROUP, value);
 }
 
+static VALUE set_init_command(VALUE self, VALUE value) {
+  return _mysql_client_options(self, MYSQL_INIT_COMMAND, value);
+}
+
 static VALUE initialize_ext(VALUE self) {
   GET_CLIENT(self);
 
@@ -1235,6 +1275,7 @@ void init_mysql2_client() {
   rb_define_private_method(cMysql2Client, "secure_auth=", set_secure_auth, 1);
   rb_define_private_method(cMysql2Client, "default_file=", set_read_default_file, 1);
   rb_define_private_method(cMysql2Client, "default_group=", set_read_default_group, 1);
+  rb_define_private_method(cMysql2Client, "init_command=", set_init_command, 1);
   rb_define_private_method(cMysql2Client, "ssl_set", set_ssl_options, 5);
   rb_define_private_method(cMysql2Client, "initialize_ext", initialize_ext, 0);
   rb_define_private_method(cMysql2Client, "connect", rb_connect, 7);
