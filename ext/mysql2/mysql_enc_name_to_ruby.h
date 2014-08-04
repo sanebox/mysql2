@@ -122,7 +122,7 @@ mysql2_mysql_enc_name_to_rb (str, len)
       {"macroman", "macRoman"},
       {"dec8", NULL},
       {"utf32", "UTF-32"},
-      {"latin1", "ISO-8859-1"},
+      {"latin1", "UTF-8"},
       {"utf8mb4", "UTF-8"},
       {"hp8", NULL},
       {"swe7", NULL},
