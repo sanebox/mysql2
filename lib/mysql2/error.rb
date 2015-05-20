@@ -5,7 +5,8 @@ module Mysql2
     REPLACEMENT_CHAR = '?'
     ENCODE_OPTS      = {:undef => :replace, :invalid => :replace, :replace => REPLACEMENT_CHAR}
 
-    attr_accessor :error_number, :sql_state
+    attr_accessor :error_number
+    attr_reader   :sql_state
     attr_writer   :server_version
 
     # Mysql gem compatibility
@@ -18,10 +19,8 @@ module Mysql2
       super(clean_message(msg))
     end
 
-    if "".respond_to? :encode
-      def sql_state=(state)
-        @sql_state = state.encode(ENCODE_OPTS)
-      end
+    def sql_state=(state)
+      @sql_state = ''.respond_to?(:encode) ? state.encode(ENCODE_OPTS) : state
     end
 
     private
@@ -31,7 +30,7 @@ module Mysql2
     # variable.
     #
     # See http://dev.mysql.com/doc/refman/5.5/en/charset-errors.html for
-    # more contetx.
+    # more context.
     #
     # Before MySQL 5.5 error message template strings are in whatever encoding
     # is associated with the error message language.

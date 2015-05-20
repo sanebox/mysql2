@@ -107,18 +107,19 @@ describe Mysql2::Result do
 
   context "streaming" do
     it "should maintain a count while streaming" do
-      result = @client.query('SELECT 1')
-
-      result.count.should eql(1)
+      result = @client.query('SELECT 1', :stream => true, :cache_rows => false)
+      result.count.should eql(0)
       result.each.to_a
       result.count.should eql(1)
     end
 
-    it "should set the actual count of rows after streaming" do
-      result = @client.query("SELECT * FROM mysql2_test", :stream => true, :cache_rows => false)
+    it "should retain the count when mixing first and each" do
+      result = @client.query("SELECT 1 UNION SELECT 2", :stream => true, :cache_rows => false)
       result.count.should eql(0)
-      result.each {|r|  }
+      result.first
       result.count.should eql(1)
+      result.each.to_a
+      result.count.should eql(2)
     end
 
     it "should not yield nil at the end of streaming" do
@@ -136,7 +137,7 @@ describe Mysql2::Result do
     it "should raise an exception if streaming ended due to a timeout" do
       # Create an extra client instance, since we're going to time it out
       client = Mysql2::Client.new DatabaseCredentials['root']
-      client.query "CREATE TEMPORARY TABLE streamingTest (val BINARY(255))"
+      client.query "CREATE TEMPORARY TABLE streamingTest (val BINARY(255)) ENGINE=MEMORY"
 
       # Insert enough records to force the result set into multiple reads
       # (the BINARY type is used simply because it forces full width results)

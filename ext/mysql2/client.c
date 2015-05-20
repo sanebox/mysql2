@@ -169,26 +169,30 @@ static void *nogvl_connect(void *ptr) {
 
 #ifndef _WIN32
 /*
- * Redirect clientfd to a dummy socket for mysql_close to
- * write, shutdown, and close on as a no-op.
- * We do this hack because we want to call mysql_close to release
- * memory, but do not want mysql_close to drop connections in the
- * parent if the socket got shared in fork.
+ * Redirect clientfd to /dev/null for mysql_close and SSL_close to write,
+ * shutdown, and close. The hack is needed to prevent shutdown() from breaking
+ * a socket that may be in use by the parent or other processes after fork.
+ *
+ * /dev/null is used to absorb writes; previously a dummy socket was used, but
+ * it could not abosrb writes and caused openssl to go into an infinite loop.
+ *
  * Returns Qtrue or Qfalse (success or failure)
+ *
+ * Note: if this function is needed on Windows, use "nul" instead of "/dev/null"
  */
 static VALUE invalidate_fd(int clientfd)
 {
 #ifdef SOCK_CLOEXEC
   /* Atomically set CLOEXEC on the new FD in case another thread forks */
-  int sockfd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  int sockfd = open("/dev/null", O_RDWR | O_CLOEXEC);
   if (sockfd < 0) {
     /* Maybe SOCK_CLOEXEC is defined but not available on this kernel */
-    int sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    int sockfd = open("/dev/null", O_RDWR);
     fcntl(sockfd, F_SETFD, FD_CLOEXEC);
   }
 #else
   /* Well we don't have SOCK_CLOEXEC, so just set FD_CLOEXEC quickly */
-  int sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+  int sockfd = open("/dev/null", O_RDWR);
   fcntl(sockfd, F_SETFD, FD_CLOEXEC);
 #endif
 
@@ -434,7 +438,7 @@ static void *nogvl_do_result(void *ptr, char use_result) {
   MYSQL_RES *result;
 
   wrapper = (mysql_client_wrapper *)ptr;
-  if(use_result) {
+  if (use_result) {
     result = mysql_use_result(wrapper->client);
   } else {
     result = mysql_store_result(wrapper->client);
@@ -479,7 +483,7 @@ static VALUE rb_mysql_client_async_result(VALUE self) {
   }
 
   is_streaming = rb_hash_aref(rb_iv_get(self, "@current_query_options"), sym_stream);
-  if(is_streaming == Qtrue) {
+  if (is_streaming == Qtrue) {
     result = (MYSQL_RES *)rb_thread_call_without_gvl(nogvl_use_result, wrapper, RUBY_UBF_IO, 0);
   } else {
     result = (MYSQL_RES *)rb_thread_call_without_gvl(nogvl_store_result, wrapper, RUBY_UBF_IO, 0);
@@ -1374,6 +1378,10 @@ void init_mysql2_client() {
 #ifdef CLIENT_SECURE_CONNECTION
   rb_const_set(cMysql2Client, rb_intern("SECURE_CONNECTION"),
       LONG2NUM(CLIENT_SECURE_CONNECTION));
+#else
+  /* HACK because MySQL5.7 no longer defines this constant,
+   * but we're using it in our default connection flags. */
+  rb_const_set(cMysql2Client, rb_intern("SECURE_CONNECTION"), LONG2NUM(0));
 #endif
 
 #ifdef CLIENT_MULTI_STATEMENTS
