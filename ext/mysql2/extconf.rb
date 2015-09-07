@@ -3,12 +3,11 @@ require 'mkmf'
 
 def asplode lib
   if RUBY_PLATFORM =~ /mingw|mswin/
-    abort "-----\n#{lib} is missing. please check your installation of mysql and try again.\n-----"
+    abort "-----\n#{lib} is missing. Check your installation of MySQL or Connector/C, and try again.\n-----"
   elsif RUBY_PLATFORM =~ /darwin/
-    abort "-----\n#{lib} is missing. Try 'brew install mysql', check your installation of mysql and try again.\n-----"
+    abort "-----\n#{lib} is missing. You may need to 'brew install mysql' or 'port install mysql', and try again.\n-----"
   else
-    abort "-----\n#{lib} is missing. Try 'apt-get install libmysqlclient-dev' or
-'yum install mysql-devel', check your installation of mysql and try again.\n-----"
+    abort "-----\n#{lib} is missing. You may need to 'apt-get install libmysqlclient-dev' or 'yum install mysql-devel', and try again.\n-----"
   end
 end
 
@@ -34,9 +33,10 @@ dirs = ENV['PATH'].split(File::PATH_SEPARATOR) + %w[
   /usr/local/mysql
   /usr/local/mysql-*
   /usr/local/lib/mysql5*
+  /usr/local/opt/mysql5*
 ].map{|dir| "#{dir}/bin" }
 
-GLOB = "{#{dirs.join(',')}}/{mysql_config,mysql_config5}"
+GLOB = "{#{dirs.join(',')}}/{mysql_config,mysql_config5,mariadb_config}"
 
 # If the user has provided a --with-mysql-dir argument, we must respect it or fail.
 inc, lib = dir_config('mysql')
@@ -73,14 +73,8 @@ elsif mc = (with_config('mysql-config') || Dir[GLOB].first)
   rpath_dir = libs
 else
   inc, lib = dir_config('mysql', '/usr/local')
-  libs = ['m', 'z', 'socket', 'nsl', 'mygcc']
-  found = false
-  while not find_library('mysqlclient', 'mysql_query', lib, "#{lib}/mysql") do
-    exit 1 if libs.empty?
-    found ||= have_library(libs.shift)
-  end
 
-  asplode("mysql client") unless found
+  asplode("mysql client") unless find_library('mysqlclient', 'mysql_query', lib, "#{lib}/mysql")
 
   rpath_dir = lib
 end
@@ -98,11 +92,20 @@ end
   asplode h unless have_header h
 end
 
-# These gcc style flags are also supported by clang and xcode compilers,
-# so we'll use a does-it-work test instead of an is-it-gcc test.
-gcc_flags = ' -Wall -funroll-loops'
-if try_link('int main() {return 0;}', gcc_flags)
-  $CFLAGS << gcc_flags
+# This is our wishlist. We use whichever flags work on the host.
+# TODO: fix statement.c and remove -Wno-declaration-after-statement
+# TODO: fix gperf mysql_enc_name_to_ruby.h and remove -Wno-missing-field-initializers
+%w(
+  -Wall
+  -Wextra
+  -Werror
+  -Wno-unused-function
+  -Wno-declaration-after-statement
+  -Wno-missing-field-initializers
+).select do |flag|
+  try_link('int main() {return 0;}', flag)
+end.each do |flag|
+  $CFLAGS << ' ' << flag
 end
 
 if RUBY_PLATFORM =~ /mswin|mingw/
@@ -119,9 +122,9 @@ if RUBY_PLATFORM =~ /mswin|mingw/
       # Maybe in the future Ruby could provide RbConfig::CONFIG['DLLTOOL'] directly.
       dlltool = RbConfig::CONFIG['DLLWRAP'].gsub('dllwrap', 'dlltool')
       sh dlltool, '--kill-at',
-         '--dllname', 'libmysql.dll',
-         '--output-lib', 'libmysql.a',
-         '--input-def', deffile, libfile
+        '--dllname', 'libmysql.dll',
+        '--output-lib', 'libmysql.a',
+        '--input-def', deffile, libfile
     end
   end
 

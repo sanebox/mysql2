@@ -16,7 +16,7 @@
 
 VALUE cMysql2Client;
 extern VALUE mMysql2, cMysql2Error;
-static VALUE sym_id, sym_version, sym_async, sym_symbolize_keys, sym_as, sym_array, sym_stream;
+static VALUE sym_id, sym_version, sym_header_version, sym_async, sym_symbolize_keys, sym_as, sym_array, sym_stream;
 static ID intern_merge, intern_merge_bang, intern_error_number_eql, intern_sql_state_eql;
 static ID intern_brackets, intern_new;
 
@@ -170,23 +170,31 @@ static void *nogvl_connect(void *ptr) {
  */
 static VALUE invalidate_fd(int clientfd)
 {
-#ifdef SOCK_CLOEXEC
+#ifdef O_CLOEXEC
   /* Atomically set CLOEXEC on the new FD in case another thread forks */
   int sockfd = open("/dev/null", O_RDWR | O_CLOEXEC);
-  if (sockfd < 0) {
-    /* Maybe SOCK_CLOEXEC is defined but not available on this kernel */
-    int sockfd = open("/dev/null", O_RDWR);
-    fcntl(sockfd, F_SETFD, FD_CLOEXEC);
-  }
 #else
-  /* Well we don't have SOCK_CLOEXEC, so just set FD_CLOEXEC quickly */
-  int sockfd = open("/dev/null", O_RDWR);
-  fcntl(sockfd, F_SETFD, FD_CLOEXEC);
+  /* Well we don't have O_CLOEXEC, trigger the fallback code below */
+  int sockfd = -1;
 #endif
 
   if (sockfd < 0) {
-    /*
-     * Cannot raise here, because one or both of the following may be true:
+    /* Either O_CLOEXEC wasn't defined at compile time, or it was defined at
+     * compile time, but isn't available at run-time. So we'll just be quick
+     * about setting FD_CLOEXEC now.
+     */
+    int flags;
+    sockfd = open("/dev/null", O_RDWR);
+    flags = fcntl(sockfd, F_GETFD);
+    /* Do the flags dance in case there are more defined flags in the future */
+    if (flags != -1) {
+      flags |= FD_CLOEXEC;
+      fcntl(sockfd, F_SETFD, flags);
+    }
+  }
+
+  if (sockfd < 0) {
+    /* Cannot raise here, because one or both of the following may be true:
      * a) we have no GVL (in C Ruby)
      * b) are running as a GC finalizer
      */
@@ -277,7 +285,7 @@ static VALUE rb_mysql_client_escape(RB_MYSQL_UNUSED VALUE klass, VALUE str) {
   oldLen = RSTRING_LEN(str);
   newStr = xmalloc(oldLen*2+1);
 
-  newLen = mysql_escape_string((char *)newStr, StringValuePtr(str), oldLen);
+  newLen = mysql_escape_string((char *)newStr, RSTRING_PTR(str), oldLen);
   if (newLen == oldLen) {
     /* no need to return a new ruby string if nothing changed */
     xfree(newStr);
@@ -322,18 +330,17 @@ static VALUE rb_mysql_info(VALUE self) {
 
 static VALUE rb_connect(VALUE self, VALUE user, VALUE pass, VALUE host, VALUE port, VALUE database, VALUE socket, VALUE flags) {
   struct nogvl_connect_args args;
-  time_t start_time, end_time;
-  unsigned int elapsed_time, connect_timeout;
+  time_t start_time, end_time, elapsed_time, connect_timeout;
   VALUE rv;
   GET_CLIENT(self);
 
-  args.host = NIL_P(host) ? NULL : StringValuePtr(host);
-  args.unix_socket = NIL_P(socket) ? NULL : StringValuePtr(socket);
-  args.port = NIL_P(port) ? 0 : NUM2INT(port);
-  args.user = NIL_P(user) ? NULL : StringValuePtr(user);
-  args.passwd = NIL_P(pass) ? NULL : StringValuePtr(pass);
-  args.db = NIL_P(database) ? NULL : StringValuePtr(database);
-  args.mysql = wrapper->client;
+  args.host        = NIL_P(host)     ? NULL : StringValueCStr(host);
+  args.unix_socket = NIL_P(socket)   ? NULL : StringValueCStr(socket);
+  args.port        = NIL_P(port)     ? 0    : NUM2INT(port);
+  args.user        = NIL_P(user)     ? NULL : StringValueCStr(user);
+  args.passwd      = NIL_P(pass)     ? NULL : StringValueCStr(pass);
+  args.db          = NIL_P(database) ? NULL : StringValueCStr(database);
+  args.mysql       = wrapper->client;
   args.client_flag = NUM2ULONG(flags);
 
   if (wrapper->connect_timeout)
@@ -350,7 +357,7 @@ static VALUE rb_connect(VALUE self, VALUE user, VALUE pass, VALUE host, VALUE po
         /* avoid an early timeout due to time truncating milliseconds off the start time */
         if (elapsed_time > 0)
           elapsed_time--;
-        if (elapsed_time >= wrapper->connect_timeout)
+        if (elapsed_time >= (time_t)wrapper->connect_timeout)
           break;
         connect_timeout = wrapper->connect_timeout - elapsed_time;
         mysql_options(wrapper->client, MYSQL_OPT_CONNECT_TIMEOUT, &connect_timeout);
@@ -489,9 +496,9 @@ static VALUE rb_mysql_client_async_result(VALUE self) {
   }
 
   current = rb_hash_dup(rb_iv_get(self, "@current_query_options"));
-  RB_GC_GUARD(current);
+  (void)RB_GC_GUARD(current);
   Check_Type(current, T_HASH);
-  resultObj = rb_mysql_result_to_obj(self, wrapper->encoding, current, result, NULL);
+  resultObj = rb_mysql_result_to_obj(self, wrapper->encoding, current, result, Qnil);
 
   return resultObj;
 }
@@ -603,7 +610,7 @@ void rb_mysql_client_set_active_thread(VALUE self) {
     const char *thr = StringValueCStr(inspect);
 
     rb_raise(cMysql2Error, "This connection is in use by: %s", thr);
-    RB_GC_GUARD(inspect);
+    (void)RB_GC_GUARD(inspect);
   }
 }
 
@@ -643,41 +650,28 @@ static VALUE rb_mysql_client_abandon_results(VALUE self) {
  * Query the database with +sql+, with optional +options+.  For the possible
  * options, see @@default_query_options on the Mysql2::Client class.
  */
-static VALUE rb_mysql_client_query(int argc, VALUE * argv, VALUE self) {
+static VALUE rb_query(VALUE self, VALUE sql, VALUE current) {
 #ifndef _WIN32
   struct async_query_args async_args;
 #endif
   struct nogvl_send_query_args args;
-  int async = 0;
-  VALUE opts, current;
-#ifdef HAVE_RUBY_ENCODING_H
-  rb_encoding *conn_enc;
-#endif
   GET_CLIENT(self);
 
   REQUIRE_CONNECTED(wrapper);
   args.mysql = wrapper->client;
 
-  current = rb_hash_dup(rb_iv_get(self, "@query_options"));
-  RB_GC_GUARD(current);
+  (void)RB_GC_GUARD(current);
   Check_Type(current, T_HASH);
   rb_iv_set(self, "@current_query_options", current);
 
-  if (rb_scan_args(argc, argv, "11", &args.sql, &opts) == 2) {
-    rb_funcall(current, intern_merge_bang, 1, opts);
-
-    if (rb_hash_aref(current, sym_async) == Qtrue) {
-      async = 1;
-    }
-  }
-
-  Check_Type(args.sql, T_STRING);
+  Check_Type(sql, T_STRING);
 #ifdef HAVE_RUBY_ENCODING_H
-  conn_enc = rb_to_encoding(wrapper->encoding);
   /* ensure the string is in the encoding the connection is expecting */
-  args.sql = rb_str_export_to_enc(args.sql, conn_enc);
+  args.sql = rb_str_export_to_enc(sql, rb_to_encoding(wrapper->encoding));
+#else
+  args.sql = sql;
 #endif
-  args.sql_ptr = StringValuePtr(args.sql);
+  args.sql_ptr = RSTRING_PTR(args.sql);
   args.sql_len = RSTRING_LEN(args.sql);
   args.wrapper = wrapper;
 
@@ -686,15 +680,15 @@ static VALUE rb_mysql_client_query(int argc, VALUE * argv, VALUE self) {
 #ifndef _WIN32
   rb_rescue2(do_send_query, (VALUE)&args, disconnect_and_raise, self, rb_eException, (VALUE)0);
 
-  if (!async) {
+  if (rb_hash_aref(current, sym_async) == Qtrue) {
+    return Qnil;
+  } else {
     async_args.fd = wrapper->client->net.fd;
     async_args.self = self;
 
     rb_rescue2(do_query, (VALUE)&async_args, disconnect_and_raise, self, rb_eException, (VALUE)0);
 
     return rb_mysql_client_async_result(self);
-  } else {
-    return Qnil;
   }
 #else
   do_send_query(&args);
@@ -731,9 +725,14 @@ static VALUE rb_mysql_client_real_escape(VALUE self, VALUE str) {
   oldLen = RSTRING_LEN(str);
   newStr = xmalloc(oldLen*2+1);
 
-  newLen = mysql_real_escape_string(wrapper->client, (char *)newStr, StringValuePtr(str), oldLen);
+  newLen = mysql_real_escape_string(wrapper->client, (char *)newStr, RSTRING_PTR(str), oldLen);
   if (newLen == oldLen) {
     /* no need to return a new ruby string if nothing changed */
+#ifdef HAVE_RUBY_ENCODING_H
+    if (default_internal_enc) {
+      str = rb_str_export_to_enc(str, default_internal_enc);
+    }
+#endif
     xfree(newStr);
     return str;
   } else {
@@ -795,17 +794,17 @@ static VALUE _mysql_client_options(VALUE self, int opt, VALUE value) {
       break;
 
     case MYSQL_READ_DEFAULT_FILE:
-      charval = (const char *)StringValuePtr(value);
+      charval = (const char *)StringValueCStr(value);
       retval  = charval;
       break;
 
     case MYSQL_READ_DEFAULT_GROUP:
-      charval = (const char *)StringValuePtr(value);
+      charval = (const char *)StringValueCStr(value);
       retval  = charval;
       break;
 
     case MYSQL_INIT_COMMAND:
-      charval = (const char *)StringValuePtr(value);
+      charval = (const char *)StringValueCStr(value);
       retval  = charval;
       break;
 
@@ -838,30 +837,23 @@ static VALUE _mysql_client_options(VALUE self, int opt, VALUE value) {
  *
  * Returns a string that represents the client library version.
  */
-static VALUE rb_mysql_client_info(VALUE self) {
-  VALUE version, client_info;
-#ifdef HAVE_RUBY_ENCODING_H
-  rb_encoding *default_internal_enc;
-  rb_encoding *conn_enc;
-  GET_CLIENT(self);
-#endif
-  version = rb_hash_new();
+static VALUE rb_mysql_client_info(RB_MYSQL_UNUSED VALUE klass) {
+  VALUE version_info, version, header_version;
+  version_info = rb_hash_new();
+
+  version = rb_str_new2(mysql_get_client_info());
+  header_version = rb_str_new2(MYSQL_LINK_VERSION);
 
 #ifdef HAVE_RUBY_ENCODING_H
-  default_internal_enc = rb_default_internal_encoding();
-  conn_enc = rb_to_encoding(wrapper->encoding);
+  rb_enc_associate(version, rb_usascii_encoding());
+  rb_enc_associate(header_version, rb_usascii_encoding());
 #endif
 
-  rb_hash_aset(version, sym_id, LONG2NUM(mysql_get_client_version()));
-  client_info = rb_str_new2(mysql_get_client_info());
-#ifdef HAVE_RUBY_ENCODING_H
-  rb_enc_associate(client_info, conn_enc);
-  if (default_internal_enc) {
-    client_info = rb_str_export_to_enc(client_info, default_internal_enc);
-  }
-#endif
-  rb_hash_aset(version, sym_version, client_info);
-  return version;
+  rb_hash_aset(version_info, sym_id, LONG2NUM(mysql_get_client_version()));
+  rb_hash_aset(version_info, sym_version, version);
+  rb_hash_aset(version_info, sym_header_version, header_version);
+
+  return version_info;
 }
 
 /* call-seq:
@@ -902,14 +894,10 @@ static VALUE rb_mysql_client_server_info(VALUE self) {
  * Return the file descriptor number for this client.
  */
 static VALUE rb_mysql_client_socket(VALUE self) {
-  GET_CLIENT(self);
 #ifndef _WIN32
-  {
-    int fd_set_fd;
-    REQUIRE_CONNECTED(wrapper);
-    fd_set_fd = wrapper->client->net.fd;
-    return INT2NUM(fd_set_fd);
-  }
+  GET_CLIENT(self);
+  REQUIRE_CONNECTED(wrapper);
+  return INT2NUM(wrapper->client->net.fd);
 #else
   rb_raise(cMysql2Error, "Raw access to the mysql file descriptor isn't supported on Windows");
 #endif
@@ -982,7 +970,7 @@ static VALUE rb_mysql_client_select_db(VALUE self, VALUE db)
   REQUIRE_CONNECTED(wrapper);
 
   args.mysql = wrapper->client;
-  args.db = StringValuePtr(db);
+  args.db = StringValueCStr(db);
 
   if (rb_thread_call_without_gvl(nogvl_select_db, &args, RUBY_UBF_IO, 0) == Qfalse)
     rb_raise_mysql2_error(wrapper);
@@ -1073,9 +1061,9 @@ static VALUE rb_mysql_client_store_result(VALUE self)
   }
 
   current = rb_hash_dup(rb_iv_get(self, "@current_query_options"));
-  RB_GC_GUARD(current);
+  (void)RB_GC_GUARD(current);
   Check_Type(current, T_HASH);
-  resultObj = rb_mysql_result_to_obj(self, wrapper->encoding, current, result, NULL);
+  resultObj = rb_mysql_result_to_obj(self, wrapper->encoding, current, result, Qnil);
 
   return resultObj;
 }
@@ -1144,7 +1132,6 @@ static VALUE set_write_timeout(VALUE self, VALUE value) {
 static VALUE set_charset_name(VALUE self, VALUE value) {
   char *charset_name;
 #ifdef HAVE_RUBY_ENCODING_H
-  size_t charset_name_len;
   const struct mysql2_mysql_enc_name_to_rb_map *mysql2rb;
   rb_encoding *enc;
   VALUE rb_enc;
@@ -1154,8 +1141,7 @@ static VALUE set_charset_name(VALUE self, VALUE value) {
   charset_name = RSTRING_PTR(value);
 
 #ifdef HAVE_RUBY_ENCODING_H
-  charset_name_len = RSTRING_LEN(value);
-  mysql2rb = mysql2_mysql_enc_name_to_rb(charset_name, charset_name_len);
+  mysql2rb = mysql2_mysql_enc_name_to_rb(charset_name, (unsigned int)RSTRING_LEN(value));
   if (mysql2rb == NULL || mysql2rb->rb_name == NULL) {
     VALUE inspect = rb_inspect(value);
     rb_raise(cMysql2Error, "Unsupported charset: '%s'", RSTRING_PTR(inspect));
@@ -1178,11 +1164,11 @@ static VALUE set_ssl_options(VALUE self, VALUE key, VALUE cert, VALUE ca, VALUE 
   GET_CLIENT(self);
 
   mysql_ssl_set(wrapper->client,
-      NIL_P(key) ? NULL : StringValuePtr(key),
-      NIL_P(cert) ? NULL : StringValuePtr(cert),
-      NIL_P(ca) ? NULL : StringValuePtr(ca),
-      NIL_P(capath) ? NULL : StringValuePtr(capath),
-      NIL_P(cipher) ? NULL : StringValuePtr(cipher));
+      NIL_P(key)    ? NULL : StringValueCStr(key),
+      NIL_P(cert)   ? NULL : StringValueCStr(cert),
+      NIL_P(ca)     ? NULL : StringValueCStr(ca),
+      NIL_P(capath) ? NULL : StringValueCStr(capath),
+      NIL_P(cipher) ? NULL : StringValueCStr(cipher));
 
   return self;
 }
@@ -1260,12 +1246,11 @@ void init_mysql2_client() {
   rb_define_alloc_func(cMysql2Client, allocate);
 
   rb_define_singleton_method(cMysql2Client, "escape", rb_mysql_client_escape, 1);
+  rb_define_singleton_method(cMysql2Client, "info", rb_mysql_client_info, 0);
 
   rb_define_method(cMysql2Client, "close", rb_mysql_client_close, 0);
-  rb_define_method(cMysql2Client, "query", rb_mysql_client_query, -1);
   rb_define_method(cMysql2Client, "abandon_results!", rb_mysql_client_abandon_results, 0);
   rb_define_method(cMysql2Client, "escape", rb_mysql_client_real_escape, 1);
-  rb_define_method(cMysql2Client, "info", rb_mysql_client_info, 0);
   rb_define_method(cMysql2Client, "server_info", rb_mysql_client_server_info, 0);
   rb_define_method(cMysql2Client, "socket", rb_mysql_client_socket, 0);
   rb_define_method(cMysql2Client, "async_result", rb_mysql_client_async_result, 0);
@@ -1297,9 +1282,11 @@ void init_mysql2_client() {
   rb_define_private_method(cMysql2Client, "ssl_set", set_ssl_options, 5);
   rb_define_private_method(cMysql2Client, "initialize_ext", initialize_ext, 0);
   rb_define_private_method(cMysql2Client, "connect", rb_connect, 7);
+  rb_define_private_method(cMysql2Client, "_query", rb_query, 2);
 
   sym_id              = ID2SYM(rb_intern("id"));
   sym_version         = ID2SYM(rb_intern("version"));
+  sym_header_version  = ID2SYM(rb_intern("header_version"));
   sym_async           = ID2SYM(rb_intern("async"));
   sym_symbolize_keys  = ID2SYM(rb_intern("symbolize_keys"));
   sym_as              = ID2SYM(rb_intern("as"));

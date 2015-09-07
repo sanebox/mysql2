@@ -9,11 +9,13 @@ This one is not.
 
 It also forces the use of UTF-8 [or binary] for the connection [and all strings in 1.9, unless Encoding.default_internal is set then it'll convert from UTF-8 to that encoding] and uses encoding-aware MySQL API calls where it can.
 
-The API consists of two classes:
+The API consists of three classes:
 
 `Mysql2::Client` - your connection to the database.
 
 `Mysql2::Result` - returned from issuing a #query on the connection. It includes Enumerable.
+
+`Mysql2::Statement` - returned from issuing a #prepare on the connection. Execute the statement to get a Result.
 
 ## Installing
 ### General Instructions
@@ -153,6 +155,20 @@ results.each(:as => :array) do |row|
 end
 ```
 
+Prepared statements are supported, as well. In a prepared statement, use a `?`
+in place of each value and then execute the statement to retrieve a result set.
+Pass your arguments to the execute method in the same number and order as the
+question marks in the statement.
+
+``` ruby
+statement = @client.prepare("SELECT * FROM users WHERE login_count = ?")
+result1 = statement.execute(1)
+result2 = statement.execute(2)
+
+statement = @client.prepare("SELECT * FROM users WHERE last_login >= ? AND location LIKE ?")
+result = statement.execute(1, "CA")
+```
+
 ## Connection options
 
 You may set the following connection options in Mysql2::Client.new(...):
@@ -186,7 +202,8 @@ Setting any of the following options will enable an SSL connection, but only if
 your MySQL client library and server have been compiled with SSL support.
 MySQL client library defaults will be used for any parameters that are left out
 or set to nil. Relative paths are allowed, and may be required by managed
-hosting providers such as Heroku.
+hosting providers such as Heroku. Set `:sslverify => true` to require that the
+server presents a valid certificate.
 
 ``` ruby
 Mysql2::Client.new(
@@ -195,7 +212,8 @@ Mysql2::Client.new(
   :sslcert => '/path/to/client-cert.pem',
   :sslca => '/path/to/ca-cert.pem',
   :sslcapath => '/path/to/cacerts',
-  :sslcipher => 'DHE-RSA-AES256-SHA'
+  :sslcipher => 'DHE-RSA-AES256-SHA',
+  :sslverify => true,
   )
 ```
 
@@ -437,13 +455,13 @@ As for field values themselves, I'm workin on it - but expect that soon.
 
 This gem is tested with the following Ruby versions on Linux and Mac OS X:
 
- * Ruby MRI 1.8.7, 1.9.2, 1.9.3, 2.0.0, 2.1.x, 2.2.x (ongoing patch releases)
+ * Ruby MRI 1.8.7, 1.9.3, 2.0.0, 2.1.x, 2.2.x
  * Ruby Enterprise Edition (based on MRI 1.8.7)
  * Rubinius 2.x
 
 This gem is tested with the following MySQL and MariaDB versions:
 
- * MySQL 5.0, 5.1, 5.5, 5.6, 5.7
+ * MySQL 5.5, 5.7
  * MySQL Connector/C 6.0 and 6.1 (primarily on Windows)
  * MariaDB 5.5, 10.0
 
@@ -536,4 +554,8 @@ though.
 * Yury Korolev (http://github.com/yury) - for TONS of help testing the Active Record adapter
 * Aaron Patterson (http://github.com/tenderlove) - tons of contributions, suggestions and general badassness
 * Mike Perham (http://github.com/mperham) - Async Active Record adapter (uses Fibers and EventMachine)
-* Aaron Stone (http://github.com/sodabrew) - additional client settings, local files, microsecond time, maintenance support.
+* Aaron Stone (http://github.com/sodabrew) - additional client settings, local files, microsecond time, maintenance support
+* Kouhei Ueno (https://github.com/nyaxt) - for the original work on Prepared Statements way back in 2012
+* John Cant (http://github.com/johncant) - polishing and updating Prepared Statements support
+* Justin Case (http://github.com/justincase) - polishing and updating Prepared Statements support and getting it merged
+* Tamir Duberstein (http://github.com/tamird) - for help with timeouts and all around updates and cleanups

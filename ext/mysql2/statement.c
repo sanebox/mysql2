@@ -3,6 +3,7 @@
 VALUE cMysql2Statement;
 extern VALUE mMysql2, cMysql2Error, cBigDecimal, cDateTime, cDate;
 static VALUE sym_stream, intern_error_number_eql, intern_sql_state_eql, intern_each;
+static VALUE intern_usec, intern_sec, intern_min, intern_hour, intern_day, intern_month, intern_year;
 
 #define GET_STATEMENT(self) \
   mysql_stmt_wrapper *stmt_wrapper; \
@@ -11,17 +12,23 @@ static VALUE sym_stream, intern_error_number_eql, intern_sql_state_eql, intern_e
 
 static void rb_mysql_stmt_mark(void * ptr) {
   mysql_stmt_wrapper* stmt_wrapper = (mysql_stmt_wrapper *)ptr;
-  if(! stmt_wrapper) return;
+  if (!stmt_wrapper) return;
 
   rb_gc_mark(stmt_wrapper->client);
 }
 
 static void rb_mysql_stmt_free(void * ptr) {
   mysql_stmt_wrapper* stmt_wrapper = (mysql_stmt_wrapper *)ptr;
+  decr_mysql2_stmt(stmt_wrapper);
+}
 
-  mysql_stmt_close(stmt_wrapper->stmt);
+void decr_mysql2_stmt(mysql_stmt_wrapper *stmt_wrapper) {
+  stmt_wrapper->refcount--;
 
-  xfree(ptr);
+  if (stmt_wrapper->refcount == 0) {
+    mysql_stmt_close(stmt_wrapper->stmt);
+    xfree(stmt_wrapper);
+  }
 }
 
 VALUE rb_raise_mysql2_stmt_error2(MYSQL_STMT *stmt
@@ -31,6 +38,7 @@ VALUE rb_raise_mysql2_stmt_error2(MYSQL_STMT *stmt
   ) {
   VALUE rb_error_msg = rb_str_new2(mysql_stmt_error(stmt));
   VALUE rb_sql_state = rb_tainted_str_new2(mysql_stmt_sqlstate(stmt));
+  VALUE e = rb_exc_new3(cMysql2Error, rb_error_msg);
 #ifdef HAVE_RUBY_ENCODING_H
   rb_encoding *default_internal_enc = rb_default_internal_encoding();
 
@@ -41,8 +49,6 @@ VALUE rb_raise_mysql2_stmt_error2(MYSQL_STMT *stmt
     rb_sql_state = rb_str_export_to_enc(rb_sql_state, default_internal_enc);
   }
 #endif
-
-  VALUE e = rb_exc_new3(cMysql2Error, rb_error_msg);
   rb_funcall(e, intern_error_number_eql, 1, UINT2NUM(mysql_stmt_errno(stmt)));
   rb_funcall(e, intern_sql_state_eql, 1, rb_sql_state);
   rb_exc_raise(e);
@@ -54,12 +60,13 @@ static void rb_raise_mysql2_stmt_error(VALUE self) {
   rb_encoding *conn_enc;
 #endif
   GET_STATEMENT(self);
+
+#ifdef HAVE_RUBY_ENCODING_H
   {
     GET_CLIENT(stmt_wrapper->client);
-#ifdef HAVE_RUBY_ENCODING_H
     conn_enc = rb_to_encoding(wrapper->encoding);
-#endif
   }
+#endif
 
   rb_raise_mysql2_stmt_error2(stmt_wrapper->stmt
 #ifdef HAVE_RUBY_ENCODING_H
@@ -102,6 +109,7 @@ VALUE rb_mysql_stmt_new(VALUE rb_client, VALUE sql) {
   rb_stmt = Data_Make_Struct(cMysql2Statement, mysql_stmt_wrapper, rb_mysql_stmt_mark, rb_mysql_stmt_free, stmt_wrapper);
   {
     stmt_wrapper->client = rb_client;
+    stmt_wrapper->refcount = 1;
     stmt_wrapper->stmt = NULL;
   }
 
@@ -134,7 +142,7 @@ VALUE rb_mysql_stmt_new(VALUE rb_client, VALUE sql) {
     // ensure the string is in the encoding the connection is expecting
     args.sql = rb_str_export_to_enc(args.sql, conn_enc);
 #endif
-    args.sql_ptr = StringValuePtr(sql);
+    args.sql_ptr = RSTRING_PTR(sql);
     args.sql_len = RSTRING_LEN(sql);
 
     if ((VALUE)rb_thread_call_without_gvl(nogvl_prepare_statement, &args, RUBY_UBF_IO, 0) == Qfalse) {
@@ -168,7 +176,7 @@ static VALUE field_count(VALUE self) {
 static void *nogvl_execute(void *ptr) {
   MYSQL_STMT *stmt = ptr;
 
-  if(mysql_stmt_execute(stmt)) {
+  if (mysql_stmt_execute(stmt)) {
     return (void*)Qfalse;
   } else {
     return (void*)Qtrue;
@@ -178,7 +186,7 @@ static void *nogvl_execute(void *ptr) {
 static void *nogvl_stmt_store_result(void *ptr) {
   MYSQL_STMT *stmt = ptr;
 
-  if(mysql_stmt_store_result(stmt)) {
+  if (mysql_stmt_store_result(stmt)) {
     return (void *)Qfalse;
   } else {
     return (void *)Qtrue;
@@ -205,30 +213,28 @@ static void *nogvl_stmt_store_result(void *ptr) {
  */
 static VALUE execute(int argc, VALUE *argv, VALUE self) {
   MYSQL_BIND *bind_buffers = NULL;
+  unsigned long *length_buffers = NULL;
   unsigned long bind_count;
   long i;
   MYSQL_STMT *stmt;
   MYSQL_RES *metadata;
+  VALUE current;
   VALUE resultObj;
-  VALUE *params_enc = alloca(sizeof(VALUE) * argc);
-  unsigned long* length_buffers = NULL;
-  int is_streaming = 0;
+  VALUE *params_enc;
+  int is_streaming;
 #ifdef HAVE_RUBY_ENCODING_H
   rb_encoding *conn_enc;
 #endif
+
   GET_STATEMENT(self);
+  GET_CLIENT(stmt_wrapper->client);
+
 #ifdef HAVE_RUBY_ENCODING_H
-  {
-    GET_CLIENT(stmt_wrapper->client);
-    conn_enc = rb_to_encoding(wrapper->encoding);
-  }
+  conn_enc = rb_to_encoding(wrapper->encoding);
 #endif
-  {
-    VALUE valStreaming = rb_hash_aref(rb_iv_get(stmt_wrapper->client, "@query_options"), sym_stream);
-    if(valStreaming == Qtrue) {
-      is_streaming = 1;
-    }
-  }
+
+  /* Scratch space for string encoding exports, allocate on the stack. */
+  params_enc = alloca(sizeof(VALUE) * argc);
 
   stmt = stmt_wrapper->stmt;
 
@@ -287,36 +293,36 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
         default:
           // TODO: what Ruby type should support MYSQL_TYPE_TIME
           if (CLASS_OF(argv[i]) == rb_cTime || CLASS_OF(argv[i]) == cDateTime) {
+            MYSQL_TIME t;
+            VALUE rb_time = argv[i];
+
             bind_buffers[i].buffer_type = MYSQL_TYPE_DATETIME;
             bind_buffers[i].buffer = xmalloc(sizeof(MYSQL_TIME));
 
-            MYSQL_TIME t;
-            VALUE rb_time = argv[i];
             memset(&t, 0, sizeof(MYSQL_TIME));
             t.neg = 0;
-            t.second_part = FIX2INT(rb_funcall(rb_time, rb_intern("usec"), 0));
-            t.second = FIX2INT(rb_funcall(rb_time, rb_intern("sec"), 0));
-            t.minute = FIX2INT(rb_funcall(rb_time, rb_intern("min"), 0));
-            t.hour = FIX2INT(rb_funcall(rb_time, rb_intern("hour"), 0));
-            t.day = FIX2INT(rb_funcall(rb_time, rb_intern("day"), 0));
-            t.month = FIX2INT(rb_funcall(rb_time, rb_intern("month"), 0));
-            t.year = FIX2INT(rb_funcall(rb_time, rb_intern("year"), 0));
+            t.second_part = FIX2INT(rb_funcall(rb_time, intern_usec, 0));
+            t.second = FIX2INT(rb_funcall(rb_time, intern_sec, 0));
+            t.minute = FIX2INT(rb_funcall(rb_time, intern_min, 0));
+            t.hour = FIX2INT(rb_funcall(rb_time, intern_hour, 0));
+            t.day = FIX2INT(rb_funcall(rb_time, intern_day, 0));
+            t.month = FIX2INT(rb_funcall(rb_time, intern_month, 0));
+            t.year = FIX2INT(rb_funcall(rb_time, intern_year, 0));
 
             *(MYSQL_TIME*)(bind_buffers[i].buffer) = t;
           } else if (CLASS_OF(argv[i]) == cDate) {
-
-            bind_buffers[i].buffer_type = MYSQL_TYPE_DATE;
-
-            bind_buffers[i].buffer = xmalloc(sizeof(MYSQL_TIME));
-
             MYSQL_TIME t;
             VALUE rb_time = argv[i];
+
+            bind_buffers[i].buffer_type = MYSQL_TYPE_DATE;
+            bind_buffers[i].buffer = xmalloc(sizeof(MYSQL_TIME));
+
             memset(&t, 0, sizeof(MYSQL_TIME));
             t.second_part = 0;
             t.neg = 0;
-            t.day = FIX2INT(rb_funcall(rb_time, rb_intern("day"), 0));
-            t.month = FIX2INT(rb_funcall(rb_time, rb_intern("month"), 0));
-            t.year = FIX2INT(rb_funcall(rb_time, rb_intern("year"), 0));
+            t.day = FIX2INT(rb_funcall(rb_time, intern_day, 0));
+            t.month = FIX2INT(rb_funcall(rb_time, intern_month, 0));
+            t.year = FIX2INT(rb_funcall(rb_time, intern_year, 0));
 
             *(MYSQL_TIME*)(bind_buffers[i].buffer) = t;
           } else if (CLASS_OF(argv[i]) == cBigDecimal) {
@@ -341,8 +347,8 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
   FREE_BINDS;
 
   metadata = mysql_stmt_result_metadata(stmt);
-  if(metadata == NULL) {
-    if(mysql_stmt_errno(stmt) != 0) {
+  if (metadata == NULL) {
+    if (mysql_stmt_errno(stmt) != 0) {
       // either CR_OUT_OF_MEMORY or CR_UNKNOWN_ERROR. both fatal.
 
       MARK_CONN_INACTIVE(stmt_wrapper->client);
@@ -352,29 +358,21 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
     return Qnil;
   }
 
-  VALUE current;
   current = rb_hash_dup(rb_iv_get(stmt_wrapper->client, "@query_options"));
-  GET_CLIENT(stmt_wrapper->client);
+  (void)RB_GC_GUARD(current);
+  Check_Type(current, T_HASH);
 
+  is_streaming = (Qtrue == rb_hash_aref(current, sym_stream));
   if (!is_streaming) {
     // recieve the whole result set from the server
     if (rb_thread_call_without_gvl(nogvl_stmt_store_result, stmt, RUBY_UBF_IO, 0) == Qfalse) {
+      mysql_free_result(metadata);
       rb_raise_mysql2_stmt_error(self);
     }
     MARK_CONN_INACTIVE(stmt_wrapper->client);
   }
 
-  resultObj = rb_mysql_result_to_obj(stmt_wrapper->client, wrapper->encoding, current, metadata, stmt);
-
-#ifdef HAVE_RUBY_ENCODING_H
-  {
-    mysql2_result_wrapper *result_wrapper;
-
-    GET_CLIENT(stmt_wrapper->client);
-    GetMysql2Result(resultObj, result_wrapper);
-    result_wrapper->encoding = wrapper->encoding;
-  }
-#endif
+  resultObj = rb_mysql_result_to_obj(stmt_wrapper->client, wrapper->encoding, current, metadata, self);
 
   if (!is_streaming) {
     // cache all result
@@ -445,4 +443,12 @@ void init_mysql2_statement() {
   intern_error_number_eql = rb_intern("error_number=");
   intern_sql_state_eql = rb_intern("sql_state=");
   intern_each = rb_intern("each");
+
+  intern_usec = rb_intern("usec");
+  intern_sec = rb_intern("sec");
+  intern_min = rb_intern("min");
+  intern_hour = rb_intern("hour");
+  intern_day = rb_intern("day");
+  intern_month = rb_intern("month");
+  intern_year = rb_intern("year");
 }

@@ -44,6 +44,12 @@ module Mysql2
       ssl_options = opts.values_at(:sslkey, :sslcert, :sslca, :sslcapath, :sslcipher)
       ssl_set(*ssl_options) if ssl_options.any?
 
+      # SSL verify is a connection flag rather than a mysql_ssl_set option
+      flags = 0
+      flags |= @query_options[:connect_flags]
+      flags |= opts[:flags] if opts[:flags]
+      flags |= SSL_VERIFY_SERVER_CERT if opts[:sslverify] and ssl_options.any?
+
       if [:user,:pass,:hostname,:dbname,:db,:sock].any?{|k| @query_options.has_key?(k) }
         warn "============= WARNING FROM mysql2 ============="
         warn "The options :user, :pass, :hostname, :dbname, :db, and :sock will be deprecated at some point in the future."
@@ -57,7 +63,6 @@ module Mysql2
       port     = opts[:port]
       database = opts[:database] || opts[:dbname] || opts[:db]
       socket   = opts[:socket] || opts[:sock]
-      flags    = opts[:flags] ? opts[:flags] | @query_options[:connect_flags] : @query_options[:connect_flags]
 
       # Correct the data types before passing these values down to the C level
       user = user.to_s unless user.nil?
@@ -74,12 +79,30 @@ module Mysql2
       @@default_query_options
     end
 
+    if Thread.respond_to?(:handle_interrupt)
+      require 'timeout'
+
+      def query(sql, options = {})
+        Thread.handle_interrupt(::Timeout::ExitException => :never) do
+          _query(sql, @query_options.merge(options))
+        end
+      end
+    else
+      def query(sql, options = {})
+        _query(sql, @query_options.merge(options))
+      end
+    end
+
     def query_info
       info = query_info_string
       return {} unless info
       info_hash = {}
       info.split.each_slice(2) { |s| info_hash[s[0].downcase.delete(':').to_sym] = s[1].to_i }
       info_hash
+    end
+
+    def info
+      self.class.info
     end
 
     private
