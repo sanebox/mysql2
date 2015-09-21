@@ -17,8 +17,7 @@
 VALUE cMysql2Client;
 extern VALUE mMysql2, cMysql2Error;
 static VALUE sym_id, sym_version, sym_header_version, sym_async, sym_symbolize_keys, sym_as, sym_array, sym_stream;
-static ID intern_merge, intern_merge_bang, intern_error_number_eql, intern_sql_state_eql;
-static ID intern_brackets, intern_new;
+static ID intern_brackets, intern_merge, intern_merge_bang, intern_new_with_args;
 
 #ifndef HAVE_RB_HASH_DUP
 VALUE rb_hash_dup(VALUE other) {
@@ -124,11 +123,12 @@ static VALUE rb_raise_mysql2_error(mysql_client_wrapper *wrapper) {
   rb_enc_associate(rb_sql_state, rb_usascii_encoding());
 #endif
 
-  e = rb_funcall(cMysql2Error, intern_new, 2, rb_error_msg, LONG2FIX(wrapper->server_version));
-  rb_funcall(e, intern_error_number_eql, 1, UINT2NUM(mysql_errno(wrapper->client)));
-  rb_funcall(e, intern_sql_state_eql, 1, rb_sql_state);
+  e = rb_funcall(cMysql2Error, intern_new_with_args, 4,
+                 rb_error_msg,
+                 LONG2FIX(wrapper->server_version),
+                 UINT2NUM(mysql_errno(wrapper->client)),
+                 rb_sql_state);
   rb_exc_raise(e);
-  return Qnil;
 }
 
 static void *nogvl_init(void *ptr) {
@@ -209,32 +209,19 @@ static VALUE invalidate_fd(int clientfd)
 #endif /* _WIN32 */
 
 static void *nogvl_close(void *ptr) {
-  mysql_client_wrapper *wrapper;
-  wrapper = ptr;
-  if (wrapper->connected) {
-    wrapper->active_thread = Qnil;
-    wrapper->connected = 0;
-#ifndef _WIN32
-    /* Invalidate the socket before calling mysql_close(). This prevents
-     * mysql_close() from sending a mysql-QUIT or from calling shutdown() on
-     * the socket. The difference is that invalidate_fd will drop this
-     * process's reference to the socket only, while a QUIT or shutdown()
-     * would render the underlying connection unusable, interrupting other
-     * processes which share this object across a fork().
-     */
-    if (invalidate_fd(wrapper->client->net.fd) == Qfalse) {
-      fprintf(stderr, "[WARN] mysql2 failed to invalidate FD safely, leaking some memory\n");
-      close(wrapper->client->net.fd);
-      return NULL;
-    }
-#endif
+  mysql_client_wrapper *wrapper = ptr;
 
-    mysql_close(wrapper->client); /* only used to free memory at this point */
+  if (wrapper->client) {
+    mysql_close(wrapper->client);
+    wrapper->client = NULL;
+    wrapper->connected = 0;
+    wrapper->active_thread = Qnil;
   }
 
   return NULL;
 }
 
+/* this is called during GC */
 static void rb_mysql_client_free(void *ptr) {
   mysql_client_wrapper *wrapper = (mysql_client_wrapper *)ptr;
   decr_mysql2_client(wrapper);
@@ -245,6 +232,22 @@ void decr_mysql2_client(mysql_client_wrapper *wrapper)
   wrapper->refcount--;
 
   if (wrapper->refcount == 0) {
+#ifndef _WIN32
+    if (wrapper->connected) {
+      /* The client is being garbage collected while connected. Prevent
+       * mysql_close() from sending a mysql-QUIT or from calling shutdown() on
+       * the socket by invalidating it. invalidate_fd() will drop this
+       * process's reference to the socket only, while a QUIT or shutdown()
+       * would render the underlying connection unusable, interrupting other
+       * processes which share this object across a fork().
+       */
+      if (invalidate_fd(wrapper->client->net.fd) == Qfalse) {
+        fprintf(stderr, "[WARN] mysql2 failed to invalidate FD safely\n");
+        close(wrapper->client->net.fd);
+      }
+    }
+#endif
+
     nogvl_close(wrapper);
     xfree(wrapper->client);
     xfree(wrapper);
@@ -256,7 +259,7 @@ static VALUE allocate(VALUE klass) {
   mysql_client_wrapper * wrapper;
   obj = Data_Make_Struct(klass, mysql_client_wrapper, rb_mysql_client_mark, rb_mysql_client_free, wrapper);
   wrapper->encoding = Qnil;
-  wrapper->active_thread = Qnil;
+  MARK_CONN_INACTIVE(self);
   wrapper->server_version = 0;
   wrapper->reconnect_enabled = 0;
   wrapper->connect_timeout = 0;
@@ -378,10 +381,13 @@ static VALUE rb_connect(VALUE self, VALUE user, VALUE pass, VALUE host, VALUE po
 }
 
 /*
- * Immediately disconnect from the server, normally the garbage collector
- * will disconnect automatically when a connection is no longer needed.
- * Explicitly closing this will free up server resources sooner than waiting
- * for the garbage collector.
+ * Terminate the connection; call this when the connection is no longer needed.
+ * The garbage collector can close the connection, but doing so emits an
+ * "Aborted connection" error on the server and increments the Aborted_clients
+ * status variable.
+ *
+ * @see http://dev.mysql.com/doc/en/communication-errors.html
+ * @return [void]
  */
 static VALUE rb_mysql_client_close(VALUE self) {
   GET_CLIENT(self);
@@ -412,7 +418,7 @@ static VALUE do_send_query(void *args) {
   mysql_client_wrapper *wrapper = query_args->wrapper;
   if ((VALUE)rb_thread_call_without_gvl(nogvl_send_query, args, RUBY_UBF_IO, 0) == Qfalse) {
     /* an error occurred, we're not active anymore */
-    wrapper->active_thread = Qnil;
+    MARK_CONN_INACTIVE(self);
     return rb_raise_mysql2_error(wrapper);
   }
   return Qnil;
@@ -443,7 +449,7 @@ static void *nogvl_do_result(void *ptr, char use_result) {
 
   /* once our result is stored off, this connection is
      ready for another command to be issued */
-  wrapper->active_thread = Qnil;
+  MARK_CONN_INACTIVE(self);
 
   return result;
 }
@@ -512,7 +518,7 @@ struct async_query_args {
 static VALUE disconnect_and_raise(VALUE self, VALUE error) {
   GET_CLIENT(self);
 
-  wrapper->active_thread = Qnil;
+  MARK_CONN_INACTIVE(self);
   wrapper->connected = 0;
 
   /* Invalidate the MySQL socket to prevent further communication.
@@ -524,8 +530,6 @@ static VALUE disconnect_and_raise(VALUE self, VALUE error) {
   }
 
   rb_exc_raise(error);
-
-  return Qnil;
 }
 
 static VALUE do_query(void *args) {
@@ -588,7 +592,7 @@ static VALUE finish_and_mark_inactive(void *args) {
     result = (MYSQL_RES *)rb_thread_call_without_gvl(nogvl_store_result, wrapper, RUBY_UBF_IO, 0);
     mysql_free_result(result);
 
-    wrapper->active_thread = Qnil;
+    MARK_CONN_INACTIVE(self);
   }
 
   return Qnil;
@@ -610,7 +614,6 @@ void rb_mysql_client_set_active_thread(VALUE self) {
     const char *thr = StringValueCStr(inspect);
 
     rb_raise(cMysql2Error, "This connection is in use by: %s", thr);
-    (void)RB_GC_GUARD(inspect);
   }
 }
 
@@ -648,7 +651,7 @@ static VALUE rb_mysql_client_abandon_results(VALUE self) {
  *    client.query(sql, options = {})
  *
  * Query the database with +sql+, with optional +options+.  For the possible
- * options, see @@default_query_options on the Mysql2::Client class.
+ * options, see default_query_options on the Mysql2::Client class.
  */
 static VALUE rb_query(VALUE self, VALUE sql, VALUE current) {
 #ifndef _WIN32
@@ -893,15 +896,17 @@ static VALUE rb_mysql_client_server_info(VALUE self) {
  *
  * Return the file descriptor number for this client.
  */
-static VALUE rb_mysql_client_socket(VALUE self) {
 #ifndef _WIN32
+static VALUE rb_mysql_client_socket(VALUE self) {
   GET_CLIENT(self);
   REQUIRE_CONNECTED(wrapper);
   return INT2NUM(wrapper->client->net.fd);
-#else
-  rb_raise(cMysql2Error, "Raw access to the mysql file descriptor isn't supported on Windows");
-#endif
 }
+#else
+static VALUE rb_mysql_client_socket(RB_MYSQL_UNUSED VALUE self) {
+  rb_raise(cMysql2Error, "Raw access to the mysql file descriptor isn't supported on Windows");
+}
+#endif
 
 /* call-seq:
  *    client.last_id
@@ -1213,6 +1218,7 @@ static VALUE rb_mysql_client_prepare_statement(VALUE self, VALUE sql) {
 }
 
 void init_mysql2_client() {
+#ifdef _WIN32
   /* verify the libmysql we're about to use was the version we were built against
      https://github.com/luislavena/mysql-gem/commit/a600a9c459597da0712f70f43736e24b484f8a99 */
   int i;
@@ -1227,15 +1233,14 @@ void init_mysql2_client() {
     }
     if (lib[i] != MYSQL_LINK_VERSION[i]) {
       rb_raise(rb_eRuntimeError, "Incorrect MySQL client library version! This gem was compiled for %s but the client library is %s.", MYSQL_LINK_VERSION, lib);
-      return;
     }
   }
+#endif
 
   /* Initializing mysql library, so different threads could call Client.new */
   /* without race condition in the library */
   if (mysql_library_init(0, NULL, NULL) != 0) {
     rb_raise(rb_eRuntimeError, "Could not initialize MySQL client library");
-    return;
   }
 
 #if 0
@@ -1294,11 +1299,9 @@ void init_mysql2_client() {
   sym_stream          = ID2SYM(rb_intern("stream"));
 
   intern_brackets = rb_intern("[]");
-  intern_new = rb_intern("new");
   intern_merge = rb_intern("merge");
   intern_merge_bang = rb_intern("merge!");
-  intern_error_number_eql = rb_intern("error_number=");
-  intern_sql_state_eql = rb_intern("sql_state=");
+  intern_new_with_args = rb_intern("new_with_args");
 
 #ifdef CLIENT_LONG_PASSWORD
   rb_const_set(cMysql2Client, rb_intern("LONG_PASSWORD"),

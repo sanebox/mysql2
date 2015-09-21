@@ -46,7 +46,7 @@ RSpec.describe Mysql2::Client do
   it "should accept connect flags and pass them to #connect" do
     klient = Class.new(Mysql2::Client) do
       attr_reader :connect_args
-      def connect *args
+      def connect(*args)
         @connect_args ||= []
         @connect_args << args
       end
@@ -58,7 +58,7 @@ RSpec.describe Mysql2::Client do
   it "should default flags to (REMEMBER_OPTIONS, LONG_PASSWORD, LONG_FLAG, TRANSACTIONS, PROTOCOL_41, SECURE_CONNECTION)" do
     klient = Class.new(Mysql2::Client) do
       attr_reader :connect_args
-      def connect *args
+      def connect(*args)
         @connect_args ||= []
         @connect_args << args
       end
@@ -117,32 +117,37 @@ RSpec.describe Mysql2::Client do
 
   it "should be able to connect via SSL options" do
     ssl = @client.query "SHOW VARIABLES LIKE 'have_ssl'"
-    ssl_uncompiled = ssl.any? {|x| x['Value'] == 'OFF'}
+    ssl_uncompiled = ssl.any? { |x| x['Value'] == 'OFF' }
     pending("DON'T WORRY, THIS TEST PASSES - but SSL is not compiled into your MySQL daemon.") if ssl_uncompiled
-    ssl_disabled = ssl.any? {|x| x['Value'] == 'DISABLED'}
+    ssl_disabled = ssl.any? { |x| x['Value'] == 'DISABLED' }
     pending("DON'T WORRY, THIS TEST PASSES - but SSL is not enabled in your MySQL daemon.") if ssl_disabled
 
     # You may need to adjust the lines below to match your SSL certificate paths
     ssl_client = nil
     expect {
+      # rubocop:disable Style/TrailingComma
       ssl_client = Mysql2::Client.new(
-        :sslkey    => '/etc/mysql/client-key.pem',
-        :sslcert   => '/etc/mysql/client-cert.pem',
-        :sslca     => '/etc/mysql/ca-cert.pem',
-        :sslcapath => '/etc/mysql/',
-        :sslcipher => 'DHE-RSA-AES256-SHA'
+        DatabaseCredentials['root'].merge(
+          'host'     => 'mysql2gem.example.com', # must match the certificates
+          :sslkey    => '/etc/mysql/client-key.pem',
+          :sslcert   => '/etc/mysql/client-cert.pem',
+          :sslca     => '/etc/mysql/ca-cert.pem',
+          :sslcipher => 'DHE-RSA-AES256-SHA',
+          :sslverify => true
+        )
       )
+      # rubocop:enable Style/TrailingComma
     }.not_to raise_error
 
     results = ssl_client.query("SHOW STATUS WHERE Variable_name = \"Ssl_version\" OR Variable_name = \"Ssl_cipher\"").to_a
     expect(results[0]['Variable_name']).to eql('Ssl_cipher')
     expect(results[0]['Value']).not_to be_nil
-    expect(results[0]['Value']).to be_kind_of(String)
+    expect(results[0]['Value']).to be_an_instance_of(String)
     expect(results[0]['Value']).not_to be_empty
 
     expect(results[1]['Variable_name']).to eql('Ssl_version')
     expect(results[1]['Value']).not_to be_nil
-    expect(results[1]['Value']).to be_kind_of(String)
+    expect(results[1]['Value']).to be_an_instance_of(String)
     expect(results[1]['Value']).not_to be_empty
 
     ssl_client.close
@@ -155,6 +160,14 @@ RSpec.describe Mysql2::Client do
       GC.start
     end
     sleep(0.5)
+  end
+
+  it "should terminate connections when calling close" do
+    expect {
+      Mysql2::Client.new(DatabaseCredentials['root']).close
+    }.to_not change {
+      @client.query("SHOW STATUS LIKE 'Aborted_clients'").first['Value'].to_i
+    }
   end
 
   it "should not leave dangling connections after garbage collection" do
@@ -182,7 +195,7 @@ RSpec.describe Mysql2::Client do
 
     # this empty `fork` call fixes this tests on RBX; without it, the next
     # `fork` call hangs forever. WTF?
-    fork { }
+    fork {}
 
     fork do
       client.query('SELECT 1')
@@ -264,7 +277,7 @@ RSpec.describe Mysql2::Client do
         # # Note that mysql_info() returns a non-NULL value for INSERT ... VALUES only for the multiple-row form of the statement (that is, only if multiple value lists are specified).
         @client.query("INSERT INTO infoTest (blah) VALUES (1234),(4535)")
 
-        expect(@client.query_info).to  eql({:records => 2, :duplicates => 0, :warnings => 0})
+        expect(@client.query_info).to eql(:records => 2, :duplicates => 0, :warnings => 0)
         expect(@client.query_info_string).to eq('Records: 2  Duplicates: 0  Warnings: 0')
 
         @client.query "DROP TABLE infoTest"
@@ -276,7 +289,7 @@ RSpec.describe Mysql2::Client do
     before(:all) do
       @client_i = Mysql2::Client.new DatabaseCredentials['root'].merge(:local_infile => true)
       local = @client_i.query "SHOW VARIABLES LIKE 'local_infile'"
-      local_enabled = local.any? {|x| x['Value'] == 'ON'}
+      local_enabled = local.any? { |x| x['Value'] == 'ON' }
       pending("DON'T WORRY, THIS TEST PASSES - but LOCAL INFILE is not enabled in your MySQL daemon.") unless local_enabled
 
       @client_i.query %[
@@ -308,10 +321,10 @@ RSpec.describe Mysql2::Client do
     it "should LOAD DATA LOCAL INFILE" do
       @client_i.query "LOAD DATA LOCAL INFILE 'spec/test_data' INTO TABLE infileTest"
       info = @client_i.query_info
-      expect(info).to eql({:records => 1, :deleted => 0, :skipped => 0, :warnings => 0})
+      expect(info).to eql(:records => 1, :deleted => 0, :skipped => 0, :warnings => 0)
 
       result = @client_i.query "SELECT * FROM infileTest"
-      expect(result.first).to eql({'id' => 1, 'foo' => 'Hello', 'bar' => 'World'})
+      expect(result.first).to eql('id' => 1, 'foo' => 'Hello', 'bar' => 'World')
     end
   end
 
@@ -379,16 +392,16 @@ RSpec.describe Mysql2::Client do
     end
 
     it "should return results as a hash by default" do
-      expect(@client.query("SELECT 1").first.class).to eql(Hash)
+      expect(@client.query("SELECT 1").first).to be_an_instance_of(Hash)
     end
 
     it "should be able to return results as an array" do
-      expect(@client.query("SELECT 1", :as => :array).first.class).to eql(Array)
+      expect(@client.query("SELECT 1", :as => :array).first).to be_an_instance_of(Array)
       @client.query("SELECT 1").each(:as => :array)
     end
 
     it "should be able to return results with symbolized keys" do
-      expect(@client.query("SELECT 1", :symbolize_keys => true).first.keys[0].class).to eql(Symbol)
+      expect(@client.query("SELECT 1", :symbolize_keys => true).first.keys[0]).to be_an_instance_of(Symbol)
     end
 
     it "should require an open connection" do
@@ -451,7 +464,7 @@ RSpec.describe Mysql2::Client do
       end
 
       it "#socket should return a Fixnum (file descriptor from C)" do
-        expect(@client.socket.class).to eql(Fixnum)
+        expect(@client.socket).to be_an_instance_of(Fixnum)
         expect(@client.socket).not_to eql(0)
       end
 
@@ -462,10 +475,24 @@ RSpec.describe Mysql2::Client do
         }.to raise_error(Mysql2::Error)
       end
 
-      it 'should be impervious to connection-corrupting timeouts ' do
+      it 'should be impervious to connection-corrupting timeouts in #query' do
         pending('`Thread.handle_interrupt` is not defined') unless Thread.respond_to?(:handle_interrupt)
         # attempt to break the connection
         expect { Timeout.timeout(0.1) { @client.query('SELECT SLEEP(0.2)') } }.to raise_error(Timeout::Error)
+
+        # expect the connection to not be broken
+        expect { @client.query('SELECT 1') }.to_not raise_error
+      end
+
+      it 'should be impervious to connection-corrupting timeouts in #execute' do
+        # the statement handle gets corrupted and will segfault the tests if interrupted,
+        # so we can't even use pending on this test, really have to skip it on older Rubies.
+        skip('`Thread.handle_interrupt` is not defined') unless Thread.respond_to?(:handle_interrupt)
+
+        # attempt to break the connection
+        stmt = @client.prepare('SELECT SLEEP(?)')
+        expect { Timeout.timeout(0.1) { stmt.execute(0.2) } }.to raise_error(Timeout::Error)
+        stmt.close
 
         # expect the connection to not be broken
         expect { @client.query('SELECT 1') }.to_not raise_error
@@ -542,7 +569,7 @@ RSpec.describe Mysql2::Client do
         expect(loops >= 1).to be true
 
         result = @client.async_result
-        expect(result.class).to eql(Mysql2::Result)
+        expect(result).to be_an_instance_of(Mysql2::Result)
       end
     end
 
@@ -561,21 +588,19 @@ RSpec.describe Mysql2::Client do
       end
 
       it "returns multiple result sets" do
-        expect(@multi_client.query("SELECT 1 AS 'set_1'; SELECT 2 AS 'set_2'").first).to eql({ 'set_1' => 1 })
+        expect(@multi_client.query("SELECT 1 AS 'set_1'; SELECT 2 AS 'set_2'").first).to eql('set_1' => 1)
 
         expect(@multi_client.next_result).to be true
-        expect(@multi_client.store_result.first).to eql({ 'set_2' => 2 })
+        expect(@multi_client.store_result.first).to eql('set_2' => 2)
 
         expect(@multi_client.next_result).to be false
       end
 
       it "does not interfere with other statements" do
         @multi_client.query("SELECT 1 AS 'set_1'; SELECT 2 AS 'set_2'")
-        while( @multi_client.next_result )
-          @multi_client.store_result
-        end
+        @multi_client.store_result while @multi_client.next_result
 
-        expect(@multi_client.query("SELECT 3 AS 'next'").first).to eq({ 'next' => 3 })
+        expect(@multi_client.query("SELECT 3 AS 'next'").first).to eq('next' => 3)
       end
 
       it "will raise on query if there are outstanding results to read" do
@@ -606,11 +631,11 @@ RSpec.describe Mysql2::Client do
       it "#more_results? should work with stored procedures" do
         @multi_client.query("DROP PROCEDURE IF EXISTS test_proc")
         @multi_client.query("CREATE PROCEDURE test_proc() BEGIN SELECT 1 AS 'set_1'; SELECT 2 AS 'set_2'; END")
-        expect(@multi_client.query("CALL test_proc()").first).to eql({ 'set_1' => 1 })
+        expect(@multi_client.query("CALL test_proc()").first).to eql('set_1' => 1)
         expect(@multi_client.more_results?).to be true
 
         @multi_client.next_result
-        expect(@multi_client.store_result.first).to eql({ 'set_2' => 2 })
+        expect(@multi_client.store_result.first).to eql('set_2' => 2)
 
         @multi_client.next_result
         expect(@multi_client.store_result).to be_nil # this is the result from CALL itself
@@ -724,11 +749,11 @@ RSpec.describe Mysql2::Client do
 
   it "#info should return a hash containing the client version ID and String" do
     info = @client.info
-    expect(info.class).to eql(Hash)
+    expect(info).to be_an_instance_of(Hash)
     expect(info).to have_key(:id)
-    expect(info[:id].class).to eql(Fixnum)
+    expect(info[:id]).to be_an_instance_of(Fixnum)
     expect(info).to have_key(:version)
-    expect(info[:version].class).to eql(String)
+    expect(info[:version]).to be_an_instance_of(String)
   end
 
   context "strings returned by #info" do
@@ -755,11 +780,11 @@ RSpec.describe Mysql2::Client do
 
   it "#server_info should return a hash containing the client version ID and String" do
     server_info = @client.server_info
-    expect(server_info.class).to eql(Hash)
+    expect(server_info).to be_an_instance_of(Hash)
     expect(server_info).to have_key(:id)
-    expect(server_info[:id].class).to eql(Fixnum)
+    expect(server_info[:id]).to be_an_instance_of(Fixnum)
     expect(server_info).to have_key(:version)
-    expect(server_info[:version].class).to eql(String)
+    expect(server_info[:version]).to be_an_instance_of(String)
   end
 
   it "#server_info should require an open connection" do
@@ -848,7 +873,7 @@ RSpec.describe Mysql2::Client do
   end
 
   it "#thread_id should be a Fixnum" do
-    expect(@client.thread_id.class).to eql(Fixnum)
+    expect(@client.thread_id).to be_an_instance_of(Fixnum)
   end
 
   it "should respond to #ping" do
