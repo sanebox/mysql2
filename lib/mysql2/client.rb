@@ -10,7 +10,7 @@ module Mysql2
         :symbolize_keys => false,       # return field names as symbols instead of strings
         :database_timezone => :local,   # timezone Mysql2 will assume datetime objects are stored in
         :application_timezone => nil,   # timezone Mysql2 will convert to before handing the object back to the caller
-        :cache_rows => true,            # tells Mysql2 to use it's internal row cache for results
+        :cache_rows => true,            # tells Mysql2 to use its internal row cache for results
         :connect_flags => REMEMBER_OPTIONS | LONG_PASSWORD | LONG_FLAG | TRANSACTIONS | PROTOCOL_41 | SECURE_CONNECTION,
         :cast => true,
         :default_file => nil,
@@ -30,13 +30,13 @@ module Mysql2
       opts[:connect_timeout] = 120 unless opts.key?(:connect_timeout)
 
       # TODO: stricter validation rather than silent massaging
-      [:reconnect, :connect_timeout, :local_infile, :read_timeout, :write_timeout, :default_file, :default_group, :secure_auth, :init_command].each do |key|
+      [:reconnect, :connect_timeout, :local_infile, :read_timeout, :write_timeout, :default_file, :default_group, :secure_auth, :init_command, :automatic_close].each do |key|
         next unless opts.key?(key)
         case key
-        when :reconnect, :local_infile, :secure_auth
+        when :reconnect, :local_infile, :secure_auth, :automatic_close
           send(:"#{key}=", !!opts[key]) # rubocop:disable Style/DoubleNegation
         when :connect_timeout, :read_timeout, :write_timeout
-          send(:"#{key}=", opts[key].to_i)
+          send(:"#{key}=", opts[key]) unless opts[key].nil?
         else
           send(:"#{key}=", opts[key])
         end
@@ -48,10 +48,18 @@ module Mysql2
       ssl_options = opts.values_at(:sslkey, :sslcert, :sslca, :sslcapath, :sslcipher)
       ssl_set(*ssl_options) if ssl_options.any?
 
+      case opts[:flags]
+      when Array
+        flags = parse_flags_array(opts[:flags], @query_options[:connect_flags])
+      when String
+        flags = parse_flags_array(opts[:flags].split(' '), @query_options[:connect_flags])
+      when Integer
+        flags = @query_options[:connect_flags] | opts[:flags]
+      else
+        flags = @query_options[:connect_flags]
+      end
+
       # SSL verify is a connection flag rather than a mysql_ssl_set option
-      flags = 0
-      flags |= @query_options[:connect_flags]
-      flags |= opts[:flags] if opts[:flags]
       flags |= SSL_VERIFY_SERVER_CERT if opts[:sslverify] && ssl_options.any?
 
       if [:user, :pass, :hostname, :dbname, :db, :sock].any? { |k| @query_options.key?(k) }
@@ -77,6 +85,20 @@ module Mysql2
       socket = socket.to_s unless socket.nil?
 
       connect user, pass, host, port, database, socket, flags
+    end
+
+    def parse_flags_array(flags, initial = 0)
+      flags.reduce(initial) do |memo, f|
+        fneg = f.start_with?('-') ? f[1..-1] : nil
+        if fneg && fneg =~ /^\w+$/ && Mysql2::Client.const_defined?(fneg)
+          memo & ~ Mysql2::Client.const_get(fneg)
+        elsif f && f =~ /^\w+$/ && Mysql2::Client.const_defined?(f)
+          memo | Mysql2::Client.const_get(f)
+        else
+          warn "Unknown MySQL connection flag: '#{f}'"
+          memo
+        end
+      end
     end
 
     if Thread.respond_to?(:handle_interrupt)

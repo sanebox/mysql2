@@ -48,7 +48,7 @@ static rb_encoding *binaryEncoding;
 #define MYSQL2_MIN_TIME 62171150401ULL
 #endif
 
-#define GET_RESULT(obj) \
+#define GET_RESULT(self) \
   mysql2_result_wrapper *wrapper; \
   Data_Get_Struct(self, mysql2_result_wrapper, wrapper);
 
@@ -91,16 +91,22 @@ static void rb_mysql_result_free_result(mysql2_result_wrapper * wrapper) {
 
   if (wrapper->resultFreed != 1) {
     if (wrapper->stmt_wrapper) {
-      mysql_stmt_free_result(wrapper->stmt_wrapper->stmt);
+      if (!wrapper->stmt_wrapper->closed) {
+        mysql_stmt_free_result(wrapper->stmt_wrapper->stmt);
 
-      /* MySQL BUG? If the statement handle was previously used, and so
-       * mysql_stmt_bind_result was called, and if that result set and bind buffers were freed,
-       * MySQL still thinks the result set buffer is available and will prefetch the
-       * first result in mysql_stmt_execute. This will corrupt or crash the program.
-       * By setting bind_result_done back to 0, we make MySQL think that a result set
-       * has never been bound to this statement handle before to prevent the prefetch.
-       */
-      wrapper->stmt_wrapper->stmt->bind_result_done = 0;
+        /* MySQL BUG? If the statement handle was previously used, and so
+         * mysql_stmt_bind_result was called, and if that result set and bind buffers were freed,
+         * MySQL still thinks the result set buffer is available and will prefetch the
+         * first result in mysql_stmt_execute. This will corrupt or crash the program.
+         * By setting bind_result_done back to 0, we make MySQL think that a result set
+         * has never been bound to this statement handle before to prevent the prefetch.
+         */
+        wrapper->stmt_wrapper->stmt->bind_result_done = 0;
+      }
+
+      if (wrapper->statement != Qnil) {
+        decr_mysql2_stmt(wrapper->stmt_wrapper);
+      }
 
       if (wrapper->result_buffers) {
         unsigned int i;
@@ -134,11 +140,13 @@ static void rb_mysql_result_free(void *ptr) {
     decr_mysql2_client(wrapper->client_wrapper);
   }
 
-  if (wrapper->statement != Qnil) {
-    decr_mysql2_stmt(wrapper->stmt_wrapper);
-  }
-
   xfree(wrapper);
+}
+
+static VALUE rb_mysql_result_free_(VALUE self) {
+  GET_RESULT(self);
+  rb_mysql_result_free_result(wrapper);
+  return Qnil;
 }
 
 /*
@@ -203,7 +211,7 @@ static VALUE rb_mysql_result_fetch_field(VALUE self, unsigned int idx, int symbo
 
 #ifdef HAVE_RUBY_ENCODING_H
 static VALUE mysql2_set_field_string_encoding(VALUE val, MYSQL_FIELD field, rb_encoding *default_internal_enc, rb_encoding *conn_enc) {
-  /* if binary flag is set, respect it's wishes */
+  /* if binary flag is set, respect its wishes */
   if (field.flags & BINARY_FLAG && field.charsetnr == 63) {
     rb_enc_associate(val, binaryEncoding);
   } else if (!field.charsetnr) {
@@ -309,11 +317,10 @@ static void rb_mysql_result_alloc_result_buffers(VALUE self, MYSQL_FIELD *fields
       case MYSQL_TYPE_SET:          // char[]
       case MYSQL_TYPE_ENUM:         // char[]
       case MYSQL_TYPE_GEOMETRY:     // char[]
+      default:
         wrapper->result_buffers[i].buffer = xmalloc(fields[i].max_length);
         wrapper->result_buffers[i].buffer_length = fields[i].max_length;
         break;
-      default:
-        rb_raise(cMysql2Error, "unhandled mysql type: %d", fields[i].type);
     }
 
     wrapper->result_buffers[i].is_null = &wrapper->is_null[i];
@@ -339,14 +346,14 @@ static VALUE rb_mysql_result_fetch_row_stmt(VALUE self, MYSQL_FIELD * fields, co
   conn_enc = rb_to_encoding(wrapper->encoding);
 #endif
 
+  if (wrapper->fields == Qnil) {
+    wrapper->numberOfFields = mysql_num_fields(wrapper->result);
+    wrapper->fields = rb_ary_new2(wrapper->numberOfFields);
+  }
   if (args->asArray) {
     rowVal = rb_ary_new2(wrapper->numberOfFields);
   } else {
     rowVal = rb_hash_new();
-  }
-  if (wrapper->fields == Qnil) {
-    wrapper->numberOfFields = mysql_num_fields(wrapper->result);
-    wrapper->fields = rb_ary_new2(wrapper->numberOfFields);
   }
 
   if (wrapper->result_buffers == NULL) {
@@ -491,14 +498,12 @@ static VALUE rb_mysql_result_fetch_row_stmt(VALUE self, MYSQL_FIELD * fields, co
         case MYSQL_TYPE_SET:          // char[]
         case MYSQL_TYPE_ENUM:         // char[]
         case MYSQL_TYPE_GEOMETRY:     // char[]
+        default:
           val = rb_str_new(result_buffer->buffer, *(result_buffer->length));
 #ifdef HAVE_RUBY_ENCODING_H
           val = mysql2_set_field_string_encoding(val, fields[i], default_internal_enc, conn_enc);
 #endif
           break;
-        default:
-          rb_raise(cMysql2Error, "unhandled buffer type: %d",
-              result_buffer->buffer_type);
       }
     }
 
@@ -511,7 +516,6 @@ static VALUE rb_mysql_result_fetch_row_stmt(VALUE self, MYSQL_FIELD * fields, co
 
   return rowVal;
 }
-
 
 static VALUE rb_mysql_result_fetch_row(VALUE self, MYSQL_FIELD * fields, const result_each_args *args)
 {
@@ -537,16 +541,16 @@ static VALUE rb_mysql_result_fetch_row(VALUE self, MYSQL_FIELD * fields, const r
     return Qnil;
   }
 
+  if (wrapper->fields == Qnil) {
+    wrapper->numberOfFields = mysql_num_fields(wrapper->result);
+    wrapper->fields = rb_ary_new2(wrapper->numberOfFields);
+  }
   if (args->asArray) {
     rowVal = rb_ary_new2(wrapper->numberOfFields);
   } else {
     rowVal = rb_hash_new();
   }
   fieldLengths = mysql_fetch_lengths(wrapper->result);
-  if (wrapper->fields == Qnil) {
-    wrapper->numberOfFields = mysql_num_fields(wrapper->result);
-    wrapper->fields = rb_ary_new2(wrapper->numberOfFields);
-  }
 
   for (i = 0; i < wrapper->numberOfFields; i++) {
     VALUE field = rb_mysql_result_fetch_field(self, i, args->symbolizeKeys);
@@ -830,7 +834,9 @@ static VALUE rb_mysql_result_each_(VALUE self,
 
         if (row == Qnil) {
           /* we don't need the mysql C dataset around anymore, peace it */
-          rb_mysql_result_free_result(wrapper);
+          if (args->cacheRows) {
+            rb_mysql_result_free_result(wrapper);
+          }
           return Qnil;
         }
 
@@ -838,7 +844,7 @@ static VALUE rb_mysql_result_each_(VALUE self,
           rb_yield(row);
         }
       }
-      if (wrapper->lastRowProcessed == wrapper->numberOfRows) {
+      if (wrapper->lastRowProcessed == wrapper->numberOfRows && args->cacheRows) {
         /* we don't need the mysql C dataset around anymore, peace it */
         rb_mysql_result_free_result(wrapper);
       }
@@ -857,6 +863,10 @@ static VALUE rb_mysql_result_each(int argc, VALUE * argv, VALUE self) {
   int symbolizeKeys, asArray, castBool, cacheRows, cast;
 
   GET_RESULT(self);
+
+  if (wrapper->stmt_wrapper && wrapper->stmt_wrapper->closed) {
+    rb_raise(cMysql2Error, "Statement handle already closed");
+  }
 
   defaults = rb_iv_get(self, "@query_options");
   Check_Type(defaults, T_HASH);
@@ -878,6 +888,7 @@ static VALUE rb_mysql_result_each(int argc, VALUE * argv, VALUE self) {
 
   if (wrapper->stmt_wrapper && !cacheRows && !wrapper->is_streaming) {
     rb_warn(":cache_rows is forced for prepared statements (if not streaming)");
+    cacheRows = 1;
   }
 
   if (wrapper->stmt_wrapper && !cast) {
@@ -905,12 +916,12 @@ static VALUE rb_mysql_result_each(int argc, VALUE * argv, VALUE self) {
     app_timezone = Qnil;
   }
 
-  if (wrapper->lastRowProcessed == 0 && !wrapper->is_streaming) {
+  if (wrapper->rows == Qnil && !wrapper->is_streaming) {
     wrapper->numberOfRows = wrapper->stmt_wrapper ? mysql_stmt_num_rows(wrapper->stmt_wrapper->stmt) : mysql_num_rows(wrapper->result);
-    if (wrapper->numberOfRows == 0) {
-      wrapper->rows = rb_ary_new();
-      return wrapper->rows;
-    }
+    wrapper->rows = rb_ary_new2(wrapper->numberOfRows);
+  } else if (wrapper->rows && !cacheRows) {
+    mysql_data_seek(wrapper->result, 0);
+    wrapper->lastRowProcessed = 0;
     wrapper->rows = rb_ary_new2(wrapper->numberOfRows);
   }
 
@@ -1004,6 +1015,7 @@ void init_mysql2_result() {
   cMysql2Result = rb_define_class_under(mMysql2, "Result", rb_cObject);
   rb_define_method(cMysql2Result, "each", rb_mysql_result_each, -1);
   rb_define_method(cMysql2Result, "fields", rb_mysql_result_fetch_fields, 0);
+  rb_define_method(cMysql2Result, "free", rb_mysql_result_free_, 0);
   rb_define_method(cMysql2Result, "count", rb_mysql_result_count, 0);
   rb_define_alias(cMysql2Result, "size", "count");
 

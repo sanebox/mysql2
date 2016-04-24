@@ -133,7 +133,7 @@ static VALUE rb_raise_mysql2_error(mysql_client_wrapper *wrapper) {
 
 static void *nogvl_init(void *ptr) {
   MYSQL *client;
-  mysql_client_wrapper *wrapper = (mysql_client_wrapper *)ptr;
+  mysql_client_wrapper *wrapper = ptr;
 
   /* may initialize embedded server and read /etc/services off disk */
   client = mysql_init(wrapper->client);
@@ -213,6 +213,7 @@ static void *nogvl_close(void *ptr) {
 
   if (wrapper->client) {
     mysql_close(wrapper->client);
+    xfree(wrapper->client);
     wrapper->client = NULL;
     wrapper->connected = 0;
     wrapper->active_thread = Qnil;
@@ -223,7 +224,7 @@ static void *nogvl_close(void *ptr) {
 
 /* this is called during GC */
 static void rb_mysql_client_free(void *ptr) {
-  mysql_client_wrapper *wrapper = (mysql_client_wrapper *)ptr;
+  mysql_client_wrapper *wrapper = ptr;
   decr_mysql2_client(wrapper);
 }
 
@@ -233,7 +234,7 @@ void decr_mysql2_client(mysql_client_wrapper *wrapper)
 
   if (wrapper->refcount == 0) {
 #ifndef _WIN32
-    if (wrapper->connected) {
+    if (wrapper->connected && !wrapper->automatic_close) {
       /* The client is being garbage collected while connected. Prevent
        * mysql_close() from sending a mysql-QUIT or from calling shutdown() on
        * the socket by invalidating it. invalidate_fd() will drop this
@@ -249,7 +250,6 @@ void decr_mysql2_client(mysql_client_wrapper *wrapper)
 #endif
 
     nogvl_close(wrapper);
-    xfree(wrapper->client);
     xfree(wrapper);
   }
 }
@@ -259,7 +259,8 @@ static VALUE allocate(VALUE klass) {
   mysql_client_wrapper * wrapper;
   obj = Data_Make_Struct(klass, mysql_client_wrapper, rb_mysql_client_mark, rb_mysql_client_free, wrapper);
   wrapper->encoding = Qnil;
-  MARK_CONN_INACTIVE(self);
+  wrapper->active_thread = Qnil;
+  wrapper->automatic_close = 1;
   wrapper->server_version = 0;
   wrapper->reconnect_enabled = 0;
   wrapper->connect_timeout = 0;
@@ -331,6 +332,26 @@ static VALUE rb_mysql_info(VALUE self) {
   return rb_str;
 }
 
+static VALUE rb_mysql_get_ssl_cipher(VALUE self)
+{
+  const char *cipher;
+  VALUE rb_str;
+  GET_CLIENT(self);
+
+  cipher = mysql_get_ssl_cipher(wrapper->client);
+
+  if (cipher == NULL) {
+    return Qnil;
+  }
+
+  rb_str = rb_str_new2(cipher);
+#ifdef HAVE_RUBY_ENCODING_H
+  rb_enc_associate(rb_str, rb_utf8_encoding());
+#endif
+
+  return rb_str;
+}
+
 static VALUE rb_connect(VALUE self, VALUE user, VALUE pass, VALUE host, VALUE port, VALUE database, VALUE socket, VALUE flags) {
   struct nogvl_connect_args args;
   time_t start_time, end_time, elapsed_time, connect_timeout;
@@ -372,7 +393,7 @@ static VALUE rb_connect(VALUE self, VALUE user, VALUE pass, VALUE host, VALUE po
     if (wrapper->connect_timeout)
       mysql_options(wrapper->client, MYSQL_OPT_CONNECT_TIMEOUT, &wrapper->connect_timeout);
     if (rv == Qfalse)
-      return rb_raise_mysql2_error(wrapper);
+      rb_raise_mysql2_error(wrapper);
   }
 
   wrapper->server_version = mysql_get_server_version(wrapper->client);
@@ -381,13 +402,12 @@ static VALUE rb_connect(VALUE self, VALUE user, VALUE pass, VALUE host, VALUE po
 }
 
 /*
- * Terminate the connection; call this when the connection is no longer needed.
- * The garbage collector can close the connection, but doing so emits an
- * "Aborted connection" error on the server and increments the Aborted_clients
- * status variable.
+ * Immediately disconnect from the server; normally the garbage collector
+ * will disconnect automatically when a connection is no longer needed.
+ * Explicitly closing this will free up server resources sooner than waiting
+ * for the garbage collector.
  *
- * @see http://dev.mysql.com/doc/en/communication-errors.html
- * @return [void]
+ * @return [nil]
  */
 static VALUE rb_mysql_client_close(VALUE self) {
   GET_CLIENT(self);
@@ -418,8 +438,8 @@ static VALUE do_send_query(void *args) {
   mysql_client_wrapper *wrapper = query_args->wrapper;
   if ((VALUE)rb_thread_call_without_gvl(nogvl_send_query, args, RUBY_UBF_IO, 0) == Qfalse) {
     /* an error occurred, we're not active anymore */
-    MARK_CONN_INACTIVE(self);
-    return rb_raise_mysql2_error(wrapper);
+    wrapper->active_thread = Qnil;
+    rb_raise_mysql2_error(wrapper);
   }
   return Qnil;
 }
@@ -437,10 +457,9 @@ static void *nogvl_read_query_result(void *ptr) {
 }
 
 static void *nogvl_do_result(void *ptr, char use_result) {
-  mysql_client_wrapper *wrapper;
+  mysql_client_wrapper *wrapper = ptr;
   MYSQL_RES *result;
 
-  wrapper = (mysql_client_wrapper *)ptr;
   if (use_result) {
     result = mysql_use_result(wrapper->client);
   } else {
@@ -449,7 +468,7 @@ static void *nogvl_do_result(void *ptr, char use_result) {
 
   /* once our result is stored off, this connection is
      ready for another command to be issued */
-  MARK_CONN_INACTIVE(self);
+  wrapper->active_thread = Qnil;
 
   return result;
 }
@@ -481,8 +500,8 @@ static VALUE rb_mysql_client_async_result(VALUE self) {
   REQUIRE_CONNECTED(wrapper);
   if ((VALUE)rb_thread_call_without_gvl(nogvl_read_query_result, wrapper->client, RUBY_UBF_IO, 0) == Qfalse) {
     /* an error occurred, mark this connection inactive */
-    MARK_CONN_INACTIVE(self);
-    return rb_raise_mysql2_error(wrapper);
+    wrapper->active_thread = Qnil;
+    rb_raise_mysql2_error(wrapper);
   }
 
   is_streaming = rb_hash_aref(rb_iv_get(self, "@current_query_options"), sym_stream);
@@ -494,7 +513,7 @@ static VALUE rb_mysql_client_async_result(VALUE self) {
 
   if (result == NULL) {
     if (mysql_errno(wrapper->client) != 0) {
-      MARK_CONN_INACTIVE(self);
+      wrapper->active_thread = Qnil;
       rb_raise_mysql2_error(wrapper);
     }
     /* no data and no error, so query was not a SELECT */
@@ -518,7 +537,7 @@ struct async_query_args {
 static VALUE disconnect_and_raise(VALUE self, VALUE error) {
   GET_CLIENT(self);
 
-  MARK_CONN_INACTIVE(self);
+  wrapper->active_thread = Qnil;
   wrapper->connected = 0;
 
   /* Invalidate the MySQL socket to prevent further communication.
@@ -533,14 +552,13 @@ static VALUE disconnect_and_raise(VALUE self, VALUE error) {
 }
 
 static VALUE do_query(void *args) {
-  struct async_query_args *async_args;
+  struct async_query_args *async_args = args;
   struct timeval tv;
-  struct timeval* tvp;
+  struct timeval *tvp;
   long int sec;
   int retval;
   VALUE read_timeout;
 
-  async_args = (struct async_query_args *)args;
   read_timeout = rb_iv_get(async_args->self, "@read_timeout");
 
   tvp = NULL;
@@ -578,10 +596,8 @@ static VALUE do_query(void *args) {
 }
 #else
 static VALUE finish_and_mark_inactive(void *args) {
-  VALUE self;
+  VALUE self = args;
   MYSQL_RES *result;
-
-  self = (VALUE)args;
 
   GET_CLIENT(self);
 
@@ -592,7 +608,7 @@ static VALUE finish_and_mark_inactive(void *args) {
     result = (MYSQL_RES *)rb_thread_call_without_gvl(nogvl_store_result, wrapper, RUBY_UBF_IO, 0);
     mysql_free_result(result);
 
-    MARK_CONN_INACTIVE(self);
+    wrapper->active_thread = Qnil;
   }
 
   return Qnil;
@@ -1015,10 +1031,10 @@ static VALUE rb_mysql_client_ping(VALUE self) {
 static VALUE rb_mysql_client_more_results(VALUE self)
 {
   GET_CLIENT(self);
-    if (mysql_more_results(wrapper->client) == 0)
-      return Qfalse;
-    else
-      return Qtrue;
+  if (mysql_more_results(wrapper->client) == 0)
+    return Qfalse;
+  else
+    return Qtrue;
 }
 
 /* call-seq:
@@ -1084,6 +1100,39 @@ static VALUE rb_mysql_client_encoding(VALUE self) {
   return wrapper->encoding;
 }
 #endif
+
+/* call-seq:
+ *    client.automatic_close?
+ *
+ * @return [Boolean]
+ */
+static VALUE get_automatic_close(VALUE self) {
+  GET_CLIENT(self);
+  return wrapper->automatic_close ? Qtrue : Qfalse;
+}
+
+/* call-seq:
+ *    client.automatic_close = false
+ *
+ * Set this to +false+ to leave the connection open after it is garbage
+ * collected. To avoid "Aborted connection" errors on the server, explicitly
+ * call +close+ when the connection is no longer needed.
+ *
+ * @see http://dev.mysql.com/doc/en/communication-errors.html
+ */
+static VALUE set_automatic_close(VALUE self, VALUE value) {
+  GET_CLIENT(self);
+  if (RTEST(value)) {
+    wrapper->automatic_close = 1;
+  } else {
+#ifndef _WIN32
+    wrapper->automatic_close = 0;
+#else
+    rb_warn("Connections are always closed by garbage collector on Windows");
+#endif
+  }
+  return value;
+}
 
 /* call-seq:
  *    client.reconnect = true
@@ -1199,7 +1248,7 @@ static VALUE initialize_ext(VALUE self) {
 
   if ((VALUE)rb_thread_call_without_gvl(nogvl_init, wrapper, RUBY_UBF_IO, 0) == Qfalse) {
     /* TODO: warning - not enough memory? */
-    return rb_raise_mysql2_error(wrapper);
+    rb_raise_mysql2_error(wrapper);
   }
 
   wrapper->initialized = 1;
@@ -1268,9 +1317,12 @@ void init_mysql2_client() {
   rb_define_method(cMysql2Client, "more_results?", rb_mysql_client_more_results, 0);
   rb_define_method(cMysql2Client, "next_result", rb_mysql_client_next_result, 0);
   rb_define_method(cMysql2Client, "store_result", rb_mysql_client_store_result, 0);
+  rb_define_method(cMysql2Client, "automatic_close?", get_automatic_close, 0);
+  rb_define_method(cMysql2Client, "automatic_close=", set_automatic_close, 1);
   rb_define_method(cMysql2Client, "reconnect=", set_reconnect, 1);
   rb_define_method(cMysql2Client, "warning_count", rb_mysql_client_warning_count, 0);
   rb_define_method(cMysql2Client, "query_info_string", rb_mysql_info, 0);
+  rb_define_method(cMysql2Client, "ssl_cipher", rb_mysql_get_ssl_cipher, 0);
 #ifdef HAVE_RUBY_ENCODING_H
   rb_define_method(cMysql2Client, "encoding", rb_mysql_client_encoding, 0);
 #endif

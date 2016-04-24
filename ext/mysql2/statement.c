@@ -3,23 +3,23 @@
 VALUE cMysql2Statement;
 extern VALUE mMysql2, cMysql2Error, cBigDecimal, cDateTime, cDate;
 static VALUE sym_stream, intern_new_with_args, intern_each;
-static VALUE intern_usec, intern_sec, intern_min, intern_hour, intern_day, intern_month, intern_year;
+static VALUE intern_usec, intern_sec, intern_min, intern_hour, intern_day, intern_month, intern_year, intern_to_s;
 
 #define GET_STATEMENT(self) \
   mysql_stmt_wrapper *stmt_wrapper; \
   Data_Get_Struct(self, mysql_stmt_wrapper, stmt_wrapper); \
-  if (!stmt_wrapper->stmt) { rb_raise(cMysql2Error, "Invalid statement handle"); }
-
+  if (!stmt_wrapper->stmt) { rb_raise(cMysql2Error, "Invalid statement handle"); } \
+  if (stmt_wrapper->closed) { rb_raise(cMysql2Error, "Statement handle already closed"); }
 
 static void rb_mysql_stmt_mark(void * ptr) {
-  mysql_stmt_wrapper* stmt_wrapper = (mysql_stmt_wrapper *)ptr;
+  mysql_stmt_wrapper *stmt_wrapper = ptr;
   if (!stmt_wrapper) return;
 
   rb_gc_mark(stmt_wrapper->client);
 }
 
 static void *nogvl_stmt_close(void * ptr) {
-  mysql_stmt_wrapper *stmt_wrapper = (mysql_stmt_wrapper *)ptr;
+  mysql_stmt_wrapper *stmt_wrapper = ptr;
   if (stmt_wrapper->stmt) {
     mysql_stmt_close(stmt_wrapper->stmt);
     stmt_wrapper->stmt = NULL;
@@ -28,7 +28,7 @@ static void *nogvl_stmt_close(void * ptr) {
 }
 
 static void rb_mysql_stmt_free(void * ptr) {
-  mysql_stmt_wrapper* stmt_wrapper = (mysql_stmt_wrapper *)ptr;
+  mysql_stmt_wrapper *stmt_wrapper = ptr;
   decr_mysql2_stmt(stmt_wrapper);
 }
 
@@ -40,7 +40,6 @@ void decr_mysql2_stmt(mysql_stmt_wrapper *stmt_wrapper) {
     xfree(stmt_wrapper);
   }
 }
-
 
 void rb_raise_mysql2_stmt_error(mysql_stmt_wrapper *stmt_wrapper) {
   VALUE e;
@@ -70,7 +69,6 @@ void rb_raise_mysql2_stmt_error(mysql_stmt_wrapper *stmt_wrapper) {
   rb_exc_raise(e);
 }
 
-
 /*
  * used to pass all arguments to mysql_stmt_prepare while inside
  * nogvl_prepare_statement_args
@@ -93,7 +91,7 @@ static void *nogvl_prepare_statement(void *ptr) {
 }
 
 VALUE rb_mysql_stmt_new(VALUE rb_client, VALUE sql) {
-  mysql_stmt_wrapper* stmt_wrapper;
+  mysql_stmt_wrapper *stmt_wrapper;
   VALUE rb_stmt;
 #ifdef HAVE_RUBY_ENCODING_H
   rb_encoding *conn_enc;
@@ -105,6 +103,7 @@ VALUE rb_mysql_stmt_new(VALUE rb_client, VALUE sql) {
   {
     stmt_wrapper->client = rb_client;
     stmt_wrapper->refcount = 1;
+    stmt_wrapper->closed = 0;
     stmt_wrapper->stmt = NULL;
   }
 
@@ -178,14 +177,17 @@ static void *nogvl_execute(void *ptr) {
   }
 }
 
-static void *nogvl_stmt_store_result(void *ptr) {
-  MYSQL_STMT *stmt = ptr;
+static void set_buffer_for_string(MYSQL_BIND* bind_buffer, unsigned long *length_buffer, VALUE string) {
+  unsigned long length;
 
-  if (mysql_stmt_store_result(stmt)) {
-    return (void *)Qfalse;
-  } else {
-    return (void *)Qtrue;
-  }
+  bind_buffer->buffer_type = MYSQL_TYPE_STRING;
+  bind_buffer->buffer = RSTRING_PTR(string);
+
+  length = RSTRING_LEN(string);
+  bind_buffer->buffer_length = length;
+  *length_buffer = length;
+
+  bind_buffer->length = length_buffer;
 }
 
 /* Free each bind_buffer[i].buffer except when params_enc is non-nil, this means
@@ -278,11 +280,7 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
 #ifdef HAVE_RUBY_ENCODING_H
             params_enc[i] = rb_str_export_to_enc(params_enc[i], conn_enc);
 #endif
-            bind_buffers[i].buffer_type = MYSQL_TYPE_STRING;
-            bind_buffers[i].buffer = RSTRING_PTR(params_enc[i]);
-            bind_buffers[i].buffer_length = RSTRING_LEN(params_enc[i]);
-            length_buffers[i] = bind_buffers[i].buffer_length;
-            bind_buffers[i].length = &length_buffers[i];
+            set_buffer_for_string(&bind_buffers[i], &length_buffers[i], params_enc[i]);
           }
           break;
         default:
@@ -322,6 +320,19 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
             *(MYSQL_TIME*)(bind_buffers[i].buffer) = t;
           } else if (CLASS_OF(argv[i]) == cBigDecimal) {
             bind_buffers[i].buffer_type = MYSQL_TYPE_NEWDECIMAL;
+
+            // DECIMAL are represented with the "string representation of the
+            // original server-side value", see
+            // https://dev.mysql.com/doc/refman/5.7/en/c-api-prepared-statement-type-conversions.html
+            // This should be independent of the locale used both on the server
+            // and the client side.
+            VALUE rb_val_as_string = rb_funcall(argv[i], intern_to_s, 0);
+
+            params_enc[i] = rb_val_as_string;
+#ifdef HAVE_RUBY_ENCODING_H
+            params_enc[i] = rb_str_export_to_enc(params_enc[i], conn_enc);
+#endif
+            set_buffer_for_string(&bind_buffers[i], &length_buffers[i], params_enc[i]);
           }
           break;
       }
@@ -345,8 +356,7 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
   if (metadata == NULL) {
     if (mysql_stmt_errno(stmt) != 0) {
       // either CR_OUT_OF_MEMORY or CR_UNKNOWN_ERROR. both fatal.
-
-      MARK_CONN_INACTIVE(stmt_wrapper->client);
+      wrapper->active_thread = Qnil;
       rb_raise_mysql2_stmt_error(stmt_wrapper);
     }
     // no data and no error, so query was not a SELECT
@@ -360,11 +370,11 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
   is_streaming = (Qtrue == rb_hash_aref(current, sym_stream));
   if (!is_streaming) {
     // recieve the whole result set from the server
-    if (rb_thread_call_without_gvl(nogvl_stmt_store_result, stmt, RUBY_UBF_IO, 0) == Qfalse) {
+    if (mysql_stmt_store_result(stmt)) {
       mysql_free_result(metadata);
       rb_raise_mysql2_stmt_error(stmt_wrapper);
     }
-    MARK_CONN_INACTIVE(stmt_wrapper->client);
+    wrapper->active_thread = Qnil;
   }
 
   resultObj = rb_mysql_result_to_obj(stmt_wrapper->client, wrapper->encoding, current, metadata, self);
@@ -461,6 +471,7 @@ static VALUE rb_mysql_stmt_affected_rows(VALUE self) {
  */
 static VALUE rb_mysql_stmt_close(VALUE self) {
   GET_STATEMENT(self);
+  stmt_wrapper->closed = 1;
   rb_thread_call_without_gvl(nogvl_stmt_close, stmt_wrapper, RUBY_UBF_IO, 0);
   return Qnil;
 }
@@ -488,4 +499,6 @@ void init_mysql2_statement() {
   intern_day = rb_intern("day");
   intern_month = rb_intern("month");
   intern_year = rb_intern("year");
+
+  intern_to_s = rb_intern("to_s");
 }

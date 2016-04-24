@@ -1,5 +1,6 @@
 # encoding: UTF-8
 require 'spec_helper'
+require 'stringio'
 
 RSpec.describe Mysql2::Client do
   context "using defaults file" do
@@ -43,27 +44,33 @@ RSpec.describe Mysql2::Client do
     }.not_to raise_error
   end
 
-  it "should accept connect flags and pass them to #connect" do
-    klient = Class.new(Mysql2::Client) do
-      attr_reader :connect_args
-      def connect(*args)
-        @connect_args ||= []
-        @connect_args << args
-      end
+  Klient = Class.new(Mysql2::Client) do
+    attr_reader :connect_args
+    def connect(*args)
+      @connect_args ||= []
+      @connect_args << args
     end
-    client = klient.new :flags => Mysql2::Client::FOUND_ROWS
+  end
+
+  it "should accept connect flags and pass them to #connect" do
+    client = Klient.new :flags => Mysql2::Client::FOUND_ROWS
     expect(client.connect_args.last[6] & Mysql2::Client::FOUND_ROWS).to be > 0
   end
 
+  it "should parse flags array" do
+    client = Klient.new :flags => %w( FOUND_ROWS -PROTOCOL_41 )
+    expect(client.connect_args.last[6] & Mysql2::Client::FOUND_ROWS).to eql(Mysql2::Client::FOUND_ROWS)
+    expect(client.connect_args.last[6] & Mysql2::Client::PROTOCOL_41).to eql(0)
+  end
+
+  it "should parse flags string" do
+    client = Klient.new :flags => "FOUND_ROWS -PROTOCOL_41"
+    expect(client.connect_args.last[6] & Mysql2::Client::FOUND_ROWS).to eql(Mysql2::Client::FOUND_ROWS)
+    expect(client.connect_args.last[6] & Mysql2::Client::PROTOCOL_41).to eql(0)
+  end
+
   it "should default flags to (REMEMBER_OPTIONS, LONG_PASSWORD, LONG_FLAG, TRANSACTIONS, PROTOCOL_41, SECURE_CONNECTION)" do
-    klient = Class.new(Mysql2::Client) do
-      attr_reader :connect_args
-      def connect(*args)
-        @connect_args ||= []
-        @connect_args << args
-      end
-    end
-    client = klient.new
+    client = Klient.new
     client_flags = Mysql2::Client::REMEMBER_OPTIONS |
                    Mysql2::Client::LONG_PASSWORD |
                    Mysql2::Client::LONG_FLAG |
@@ -139,16 +146,12 @@ RSpec.describe Mysql2::Client do
       # rubocop:enable Style/TrailingComma
     }.not_to raise_error
 
-    results = ssl_client.query("SHOW STATUS WHERE Variable_name = \"Ssl_version\" OR Variable_name = \"Ssl_cipher\"").to_a
-    expect(results[0]['Variable_name']).to eql('Ssl_cipher')
-    expect(results[0]['Value']).not_to be_nil
-    expect(results[0]['Value']).to be_an_instance_of(String)
-    expect(results[0]['Value']).not_to be_empty
+    results = Hash[ssl_client.query('SHOW STATUS WHERE Variable_name LIKE "Ssl_%"').map { |x| x.values_at('Variable_name', 'Value') }]
+    expect(results['Ssl_cipher']).not_to be_empty
+    expect(results['Ssl_version']).not_to be_empty
 
-    expect(results[1]['Variable_name']).to eql('Ssl_version')
-    expect(results[1]['Value']).not_to be_nil
-    expect(results[1]['Value']).to be_an_instance_of(String)
-    expect(results[1]['Value']).not_to be_empty
+    expect(ssl_client.ssl_cipher).not_to be_empty
+    expect(results['Ssl_cipher']).to eql(ssl_client.ssl_cipher)
 
     ssl_client.close
   end
@@ -166,48 +169,97 @@ RSpec.describe Mysql2::Client do
     expect {
       Mysql2::Client.new(DatabaseCredentials['root']).close
     }.to_not change {
-      @client.query("SHOW STATUS LIKE 'Aborted_clients'").first['Value'].to_i
+      @client.query("SHOW STATUS LIKE 'Aborted_%'").to_a +
+        @client.query("SHOW STATUS LIKE 'Threads_connected'").to_a
     }
   end
 
   it "should not leave dangling connections after garbage collection" do
     run_gc
+    expect {
+      expect {
+        10.times do
+          Mysql2::Client.new(DatabaseCredentials['root']).query('SELECT 1')
+        end
+      }.to change {
+        @client.query("SHOW STATUS LIKE 'Threads_connected'").first['Value'].to_i
+      }.by(10)
 
-    client = Mysql2::Client.new(DatabaseCredentials['root'])
-    before_count = client.query("SHOW STATUS LIKE 'Threads_connected'").first['Value'].to_i
-
-    10.times do
-      Mysql2::Client.new(DatabaseCredentials['root']).query('SELECT 1')
-    end
-    after_count = client.query("SHOW STATUS LIKE 'Threads_connected'").first['Value'].to_i
-    expect(after_count).to eq(before_count + 10)
-
-    run_gc
-    final_count = client.query("SHOW STATUS LIKE 'Threads_connected'").first['Value'].to_i
-    expect(final_count).to eq(before_count)
+      run_gc
+    }.to_not change {
+      @client.query("SHOW STATUS LIKE 'Aborted_%'").to_a +
+        @client.query("SHOW STATUS LIKE 'Threads_connected'").to_a
+    }
   end
 
-  it "should not close connections when running in a child process" do
-    pending("fork is not available on this platform") unless Process.respond_to?(:fork)
-
-    run_gc
-    client = Mysql2::Client.new(DatabaseCredentials['root'])
-
-    # this empty `fork` call fixes this tests on RBX; without it, the next
-    # `fork` call hangs forever. WTF?
-    fork {}
-
-    fork do
-      client.query('SELECT 1')
-      client = nil
-      run_gc
+  context "#automatic_close" do
+    it "is enabled by default" do
+      client = Mysql2::Client.new(DatabaseCredentials['root'])
+      expect(client.automatic_close?).to be(true)
     end
 
-    Process.wait
+    if RUBY_PLATFORM =~ /mingw|mswin/
+      it "cannot be disabled" do
+        stderr, $stderr = $stderr, StringIO.new
 
-    # this will throw an error if the underlying socket was shutdown by the
-    # child's GC
-    expect { client.query('SELECT 1') }.to_not raise_exception
+        begin
+          Mysql2::Client.new(DatabaseCredentials['root'].merge(:automatic_close => false))
+          expect($stderr.string).to include('always closed by garbage collector')
+          $stderr.reopen
+
+          client = Mysql2::Client.new(DatabaseCredentials['root'])
+          client.automatic_close = false
+          expect($stderr.string).to include('always closed by garbage collector')
+          $stderr.reopen
+
+          expect { client.automatic_close = true }.to_not change { $stderr.string }
+        ensure
+          $stderr = stderr
+        end
+      end
+    else
+      it "can be configured" do
+        client = Mysql2::Client.new(DatabaseCredentials['root'].merge(:automatic_close => false))
+        expect(client.automatic_close?).to be(false)
+      end
+
+      it "can be assigned" do
+        client = Mysql2::Client.new(DatabaseCredentials['root'])
+        client.automatic_close = false
+        expect(client.automatic_close?).to be(false)
+
+        client.automatic_close = true
+        expect(client.automatic_close?).to be(true)
+
+        client.automatic_close = nil
+        expect(client.automatic_close?).to be(false)
+
+        client.automatic_close = 9
+        expect(client.automatic_close?).to be(true)
+      end
+
+      it "should not close connections when running in a child process" do
+        run_gc
+        client = Mysql2::Client.new(DatabaseCredentials['root'])
+        client.automatic_close = false
+
+        # this empty `fork` call fixes this tests on RBX; without it, the next
+        # `fork` call hangs forever. WTF?
+        fork {}
+
+        fork do
+          client.query('SELECT 1')
+          client = nil
+          run_gc
+        end
+
+        Process.wait
+
+        # this will throw an error if the underlying socket was shutdown by the
+        # child's GC
+        expect { client.query('SELECT 1') }.to_not raise_exception
+      end
+    end
   end
 
   it "should be able to connect to database with numeric-only name" do
@@ -330,20 +382,26 @@ RSpec.describe Mysql2::Client do
 
   it "should expect connect_timeout to be a positive integer" do
     expect {
-      Mysql2::Client.new(:connect_timeout => -1)
+      Mysql2::Client.new(DatabaseCredentials['root'].merge(:connect_timeout => -1))
     }.to raise_error(Mysql2::Error)
   end
 
   it "should expect read_timeout to be a positive integer" do
     expect {
-      Mysql2::Client.new(:read_timeout => -1)
+      Mysql2::Client.new(DatabaseCredentials['root'].merge(:read_timeout => -1))
     }.to raise_error(Mysql2::Error)
   end
 
   it "should expect write_timeout to be a positive integer" do
     expect {
-      Mysql2::Client.new(:write_timeout => -1)
+      Mysql2::Client.new(DatabaseCredentials['root'].merge(:write_timeout => -1))
     }.to raise_error(Mysql2::Error)
+  end
+
+  it "should allow nil read_timeout" do
+    client = Mysql2::Client.new(DatabaseCredentials['root'].merge(:read_timeout => nil))
+
+    expect(client.read_timeout).to be_nil
   end
 
   context "#query" do

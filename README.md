@@ -68,6 +68,20 @@ This may be needed if you deploy to a system where these libraries
 are located somewhere different than on your build system.
 This overrides any rpath calculated by default or by the options above.
 
+* `--with-sanitize[=address,cfi,integer,memory,thread,undefined]` -
+Enable sanitizers for Clang / GCC. If no argument is given, try to enable
+all sanitizers or fail if none are available. If a command-separated list of
+specific sanitizers is given, configure will fail unless they all are available.
+Note that the some sanitizers may incur a performance penalty, and the Address
+Sanitizer may require a runtime library.
+To see line numbers in backtraces, declare these environment variables
+(adjust the llvm-symbolizer path as needed for your system):
+
+``` sh
+  export ASAN_SYMBOLIZER_PATH=/usr/bin/llvm-symbolizer-3.4
+  export ASAN_OPTIONS=symbolize=1
+```
+
 ### Linux and other Unixes
 
 You may need to install a package such as `libmysqlclient-dev` or `mysql-devel`;
@@ -268,15 +282,26 @@ Yields:
 next_result: Unknown column 'A' in 'field list' (Mysql2::Error)
 ```
 
-See https://gist.github.com/1367987 for using MULTI_STATEMENTS with Active Record.
-
 ### Secure auth
 
 Starting wih MySQL 5.6.5, secure_auth is enabled by default on servers (it was disabled by default prior to this).
 When secure_auth is enabled, the server will refuse a connection if the account password is stored in old pre-MySQL 4.1 format.
 The MySQL 5.6.5 client library may also refuse to attempt a connection if provided an older format password.
-To bypass this restriction in the client, pass the option :secure_auth => false to Mysql2::Client.new().
-If using ActiveRecord, your database.yml might look something like this:
+To bypass this restriction in the client, pass the option `:secure_auth => false` to Mysql2::Client.new().
+
+### Flags option parsing
+
+The `:flags` parameter accepts an integer, a string, or an array. The integer
+form allows the client to assemble flags from constants defined under
+`Mysql2::Client` such as `Mysql2::Client::FOUND_ROWS`. Use a bitwise `|` (OR)
+to specify several flags.
+
+The string form will be split on whitespace and parsed as with the array form:
+Plain flags are added to the default flags, while flags prefixed with `-`
+(minus) are removed from the default flags.
+
+This allows easier use with ActiveRecord's database.yml, avoiding the need for magic flag numbers.
+For example, to disable protocol compression, and enable multiple statements and result sets:
 
 ``` yaml
 development:
@@ -287,13 +312,17 @@ development:
   password: my_password
   host: 127.0.0.1
   port: 3306
+  flags:
+    - -COMPRESS
+    - FOUND_ROWS
+    - MULTI_STATEMENTS
   secure_auth: false
 ```
 
 ### Reading a MySQL config file
 
 You may read configuration options from a MySQL configuration file by passing
-the `:default_file` and `:default_group` paramters. For example:
+the `:default_file` and `:default_group` parameters. For example:
 
 ``` ruby
 Mysql2::Client.new(:default_file => '/user/.my.cnf', :default_group => 'client')
@@ -301,7 +330,7 @@ Mysql2::Client.new(:default_file => '/user/.my.cnf', :default_group => 'client')
 
 ### Initial command on connect and reconnect
 
-If you specify the init_command option, the SQL string you provide will be executed after the connection is established.
+If you specify the `:init_command` option, the SQL string you provide will be executed after the connection is established.
 If `:reconnect` is set to `true`, init_command will also be executed after a successful reconnect.
 It is useful if you want to provide session options which survive reconnection.
 
@@ -465,20 +494,21 @@ As for field values themselves, I'm workin on it - but expect that soon.
 
 This gem is tested with the following Ruby versions on Linux and Mac OS X:
 
- * Ruby MRI 1.8.7, 1.9.3, 2.0.0, 2.1.x, 2.2.x
+ * Ruby MRI 1.8.7, 1.9.3, 2.0.0, 2.1.x, 2.2.x, 2.3.x
  * Ruby Enterprise Edition (based on MRI 1.8.7)
- * Rubinius 2.x
+ * Rubinius 2.x, 3.x
 
 This gem is tested with the following MySQL and MariaDB versions:
 
- * MySQL 5.5, 5.7
+ * MySQL 5.5, 5.6, 5.7
  * MySQL Connector/C 6.0 and 6.1 (primarily on Windows)
- * MariaDB 5.5, 10.0
+ * MariaDB 5.5, 10.0, 10.1
 
-### Active Record
+### Ruby on Rails / Active Record
 
- * mysql2 0.2.x includes an Active Record driver compatible with AR 2.3 and 3.0
- * mysql2 0.3.x does not include an AR driver because it is included in AR 3.1 and above
+ * mysql2 0.4.x works with Rails / Active Record 4.2.5 - 5.0 and higher.
+ * mysql2 0.3.x works with Rails / Active Record 3.1, 3.2, 4.x, 5.0.
+ * mysql2 0.2.x works with Rails / Active Record 2.3 - 3.0.
 
 ### Asynchronous Active Record
 

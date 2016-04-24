@@ -22,6 +22,10 @@ RSpec.describe Mysql2::Result do
     expect(@result).to respond_to(:each)
   end
 
+  it "should respond to #free" do
+    expect(@result).to respond_to(:free)
+  end
+
   it "should raise a Mysql2::Error exception upon a bad query" do
     expect {
       @client.query "bad sql"
@@ -76,6 +80,11 @@ RSpec.describe Mysql2::Result do
     it "should not cache previously yielded results if cache_rows is disabled" do
       result = @client.query "SELECT 1", :cache_rows => false
       expect(result.first.object_id).not_to eql(result.first.object_id)
+    end
+
+    it "should be able to iterate a second time even if cache_rows is disabled" do
+      result = @client.query "SELECT 1 UNION SELECT 2", :cache_rows => false
+      expect(result.to_a).to eql(result.to_a)
     end
 
     it "should yield different value for #first if streaming" do

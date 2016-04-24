@@ -117,6 +117,25 @@ RSpec.describe Mysql2::Statement do
     expect(list[1]).to eq('2')
   end
 
+  it "should update a DECIMAL value passing a BigDecimal" do
+    @client.query 'USE test'
+    @client.query 'DROP TABLE IF EXISTS mysql2_stmt_decimal_test'
+    @client.query 'CREATE TABLE mysql2_stmt_decimal_test (decimal_test DECIMAL(10,3))'
+
+    @client.prepare("INSERT INTO mysql2_stmt_decimal_test VALUES (?)").execute(BigDecimal.new("123.45"))
+
+    test_result = @client.query("SELECT * FROM mysql2_stmt_decimal_test").first
+    expect(test_result['decimal_test']).to eql(123.45)
+  end
+
+  it "should warn but still work if cache_rows is set to false" do
+    @client.query_options.merge!(:cache_rows => false)
+    statement = @client.prepare 'SELECT 1'
+    result = nil
+    expect { result = statement.execute.to_a }.to output(/:cache_rows is forced for prepared statements/).to_stderr
+    expect(result.length).to eq(1)
+  end
+
   context "utf8_db" do
     before(:each) do
       @client.query("DROP DATABASE IF EXISTS test_mysql2_stmt_utf8")
