@@ -1,16 +1,32 @@
 #!/usr/bin/env bash
 
-set -eu
+set -eux
+
+# Install MySQL 5.1 if DB=mysql51
+if [[ -n ${DB-} && x$DB =~ ^xmysql51 ]]; then
+  sudo bash .travis_mysql51.sh
+fi
 
 # Install MySQL 5.7 if DB=mysql57
 if [[ -n ${DB-} && x$DB =~ ^xmysql57 ]]; then
   sudo bash .travis_mysql57.sh
 fi
 
+# Install MySQL 8.0 if DB=mysql80
+if [[ -n ${DB-} && x$DB =~ ^xmysql80 ]]; then
+  sudo bash .travis_mysql80.sh
+fi
+
+# Install MariaDB 10.2 if DB=mariadb10.2
+# NOTE this is a workaround until Travis CI merges a fix to its mariadb addon.
+if [[ -n ${DB-} && x$DB =~ ^xmariadb10.2 ]]; then
+  sudo apt-get install -y -o Dpkg::Options::='--force-confnew' mariadb-server mariadb-server-10.2 libmariadbclient18
+fi
+
 # Install MySQL if OS=darwin
 if [[ x$OSTYPE =~ ^xdarwin ]]; then
   brew update
-  brew install "$DB"
+  brew install "$DB" mariadb-connector-c
   $(brew --prefix "$DB")/bin/mysql.server start
 fi
 
@@ -20,15 +36,12 @@ if ! [[ x$OSTYPE =~ ^xdarwin ]]; then
   sudo service mysql restart
 fi
 
-sudo mysql -u root -e "CREATE USER '$USER'@'localhost'" || true
-sudo mysql -u root -e "GRANT ALL ON test.* TO '$USER'@'localhost'" || true
-
 # Print the MySQL version and create the test DB
 if [[ x$OSTYPE =~ ^xdarwin ]]; then
   $(brew --prefix "$DB")/bin/mysqld --version
-  $(brew --prefix "$DB")/bin/mysql -u $USER -e "CREATE DATABASE IF NOT EXISTS test"
+  $(brew --prefix "$DB")/bin/mysql -u root -e 'CREATE DATABASE IF NOT EXISTS test'
 else
   mysqld --version
   # IF NOT EXISTS is mariadb-10+ only - https://mariadb.com/kb/en/mariadb/comment-syntax/
-  mysql -u $USER -e "CREATE DATABASE /*M!50701 IF NOT EXISTS */ test"
+  mysql -u root -e 'CREATE DATABASE /*M!50701 IF NOT EXISTS */ test'
 fi

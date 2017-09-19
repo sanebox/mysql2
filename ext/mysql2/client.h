@@ -44,18 +44,11 @@ typedef struct {
   unsigned int connect_timeout;
   int active;
   int automatic_close;
-  int connected;
   int initialized;
   int refcount;
-  int freed;
+  int closed;
   MYSQL *client;
 } mysql_client_wrapper;
-
-#define REQUIRE_CONNECTED(wrapper) \
-  REQUIRE_INITIALIZED(wrapper) \
-  if (!wrapper->connected && !wrapper->reconnect_enabled) { \
-    rb_raise(cMysql2Error, "closed MySQL connection"); \
-  }
 
 void rb_mysql_client_set_active_thread(VALUE self);
 

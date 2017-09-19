@@ -2,8 +2,11 @@
 
 VALUE cMysql2Statement;
 extern VALUE mMysql2, cMysql2Error, cBigDecimal, cDateTime, cDate;
-static VALUE sym_stream, intern_new_with_args, intern_each;
-static VALUE intern_usec, intern_sec, intern_min, intern_hour, intern_day, intern_month, intern_year, intern_to_s;
+static VALUE sym_stream, intern_new_with_args, intern_each, intern_to_s;
+static VALUE intern_sec_fraction, intern_usec, intern_sec, intern_min, intern_hour, intern_day, intern_month, intern_year;
+#ifndef HAVE_RB_BIG_CMP
+static ID id_cmp;
+#endif
 
 #define GET_STATEMENT(self) \
   mysql_stmt_wrapper *stmt_wrapper; \
@@ -121,7 +124,7 @@ VALUE rb_mysql_stmt_new(VALUE rb_client, VALUE sql) {
 
   // set STMT_ATTR_UPDATE_MAX_LENGTH attr
   {
-    my_bool truth = 1;
+    bool truth = 1;
     if (mysql_stmt_attr_set(stmt_wrapper->stmt, STMT_ATTR_UPDATE_MAX_LENGTH, &truth)) {
       rb_raise(cMysql2Error, "Unable to initialize prepared statement: set STMT_ATTR_UPDATE_MAX_LENGTH");
     }
@@ -180,7 +183,6 @@ static void *nogvl_execute(void *ptr) {
 static void set_buffer_for_string(MYSQL_BIND* bind_buffer, unsigned long *length_buffer, VALUE string) {
   unsigned long length;
 
-  bind_buffer->buffer_type = MYSQL_TYPE_STRING;
   bind_buffer->buffer = RSTRING_PTR(string);
 
   length = RSTRING_LEN(string);
@@ -203,6 +205,50 @@ static void set_buffer_for_string(MYSQL_BIND* bind_buffer, unsigned long *length
     xfree(bind_buffers);                                    \
     xfree(length_buffers);                                  \
   }
+
+/* return 0 if the given bignum can cast as LONG_LONG, otherwise 1 */
+static int my_big2ll(VALUE bignum, LONG_LONG *ptr)
+{
+  unsigned LONG_LONG num;
+  size_t len;
+#ifdef HAVE_RB_ABSINT_SIZE
+  int nlz_bits = 0;
+  len = rb_absint_size(bignum, &nlz_bits);
+#else
+  len = RBIGNUM_LEN(bignum) * SIZEOF_BDIGITS;
+#endif
+  if (len > sizeof(LONG_LONG)) goto overflow;
+  if (RBIGNUM_POSITIVE_P(bignum)) {
+    num = rb_big2ull(bignum);
+    if (num > LLONG_MAX)
+      goto overflow;
+    *ptr = num;
+  }
+  else {
+    if (len == 8 &&
+#ifdef HAVE_RB_ABSINT_SIZE
+        nlz_bits == 0 &&
+#endif
+#if defined(HAVE_RB_ABSINT_SIZE) && defined(HAVE_RB_ABSINT_SINGLEBIT_P)
+        /* Optimized to avoid object allocation for Ruby 2.1+
+         * only -0x8000000000000000 is safe if `len == 8 && nlz_bits == 0`
+         */
+        !rb_absint_singlebit_p(bignum)
+#elif defined(HAVE_RB_BIG_CMP)
+        rb_big_cmp(bignum, LL2NUM(LLONG_MIN)) == INT2FIX(-1)
+#else
+        /* Ruby 1.8.7 and REE doesn't have rb_big_cmp */
+        rb_funcall(bignum, id_cmp, 1, LL2NUM(LLONG_MIN)) == INT2FIX(-1)
+#endif
+       ) {
+      goto overflow;
+    }
+    *ptr = rb_big2ll(bignum);
+  }
+  return 0;
+overflow:
+  return 1;
+}
 
 /* call-seq: stmt.execute
  *
@@ -265,9 +311,23 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
 #endif
           break;
         case T_BIGNUM:
-          bind_buffers[i].buffer_type = MYSQL_TYPE_LONGLONG;
-          bind_buffers[i].buffer = xmalloc(sizeof(long long int));
-          *(LONG_LONG*)(bind_buffers[i].buffer) = rb_big2ll(argv[i]);
+          {
+            LONG_LONG num;
+            if (my_big2ll(argv[i], &num) == 0) {
+              bind_buffers[i].buffer_type = MYSQL_TYPE_LONGLONG;
+              bind_buffers[i].buffer = xmalloc(sizeof(long long int));
+              *(LONG_LONG*)(bind_buffers[i].buffer) = num;
+            } else {
+              /* The bignum was larger than we can fit in LONG_LONG, send it as a string */
+              VALUE rb_val_as_string = rb_big2str(argv[i], 10);
+              bind_buffers[i].buffer_type = MYSQL_TYPE_NEWDECIMAL;
+              params_enc[i] = rb_val_as_string;
+#ifdef HAVE_RUBY_ENCODING_H
+              params_enc[i] = rb_str_export_to_enc(params_enc[i], conn_enc);
+#endif
+              set_buffer_for_string(&bind_buffers[i], &length_buffers[i], params_enc[i]);
+            }
+          }
           break;
         case T_FLOAT:
           bind_buffers[i].buffer_type = MYSQL_TYPE_DOUBLE;
@@ -275,13 +335,23 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
           *(double*)(bind_buffers[i].buffer) = NUM2DBL(argv[i]);
           break;
         case T_STRING:
-          {
-            params_enc[i] = argv[i];
+          bind_buffers[i].buffer_type = MYSQL_TYPE_STRING;
+
+          params_enc[i] = argv[i];
 #ifdef HAVE_RUBY_ENCODING_H
-            params_enc[i] = rb_str_export_to_enc(params_enc[i], conn_enc);
+          params_enc[i] = rb_str_export_to_enc(params_enc[i], conn_enc);
 #endif
-            set_buffer_for_string(&bind_buffers[i], &length_buffers[i], params_enc[i]);
-          }
+          set_buffer_for_string(&bind_buffers[i], &length_buffers[i], params_enc[i]);
+          break;
+        case T_TRUE:
+          bind_buffers[i].buffer_type = MYSQL_TYPE_TINY;
+          bind_buffers[i].buffer = xmalloc(sizeof(signed char));
+          *(signed char*)(bind_buffers[i].buffer) = 1;
+          break;
+        case T_FALSE:
+          bind_buffers[i].buffer_type = MYSQL_TYPE_TINY;
+          bind_buffers[i].buffer = xmalloc(sizeof(signed char));
+          *(signed char*)(bind_buffers[i].buffer) = 0;
           break;
         default:
           // TODO: what Ruby type should support MYSQL_TYPE_TIME
@@ -294,7 +364,13 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
 
             memset(&t, 0, sizeof(MYSQL_TIME));
             t.neg = 0;
-            t.second_part = FIX2INT(rb_funcall(rb_time, intern_usec, 0));
+
+            if (CLASS_OF(argv[i]) == rb_cTime) {
+              t.second_part = FIX2INT(rb_funcall(rb_time, intern_usec, 0));
+            } else if (CLASS_OF(argv[i]) == cDateTime) {
+              t.second_part = NUM2DBL(rb_funcall(rb_time, intern_sec_fraction, 0)) * 1000000;
+            }
+
             t.second = FIX2INT(rb_funcall(rb_time, intern_sec, 0));
             t.minute = FIX2INT(rb_funcall(rb_time, intern_min, 0));
             t.hour = FIX2INT(rb_funcall(rb_time, intern_hour, 0));
@@ -402,6 +478,7 @@ static VALUE fields(VALUE self) {
   rb_encoding *default_internal_enc, *conn_enc;
 #endif
   GET_STATEMENT(self);
+  GET_CLIENT(stmt_wrapper->client);
   stmt = stmt_wrapper->stmt;
 
 #ifdef HAVE_RUBY_ENCODING_H
@@ -412,12 +489,22 @@ static VALUE fields(VALUE self) {
   }
 #endif
 
-  metadata    = mysql_stmt_result_metadata(stmt);
+  metadata = mysql_stmt_result_metadata(stmt);
+  if (metadata == NULL) {
+    if (mysql_stmt_errno(stmt) != 0) {
+      // either CR_OUT_OF_MEMORY or CR_UNKNOWN_ERROR. both fatal.
+      wrapper->active_thread = Qnil;
+      rb_raise_mysql2_stmt_error(stmt_wrapper);
+    }
+    // no data and no error, so query was not a SELECT
+    return Qnil;
+  }
+
   fields      = mysql_fetch_fields(metadata);
   field_count = mysql_stmt_field_count(stmt);
   field_list  = rb_ary_new2((long)field_count);
 
-  for(i = 0; i < field_count; i++) {
+  for (i = 0; i < field_count; i++) {
     VALUE rb_field;
 
     rb_field = rb_str_new(fields[i].name, fields[i].name_length);
@@ -492,6 +579,7 @@ void init_mysql2_statement() {
   intern_new_with_args = rb_intern("new_with_args");
   intern_each = rb_intern("each");
 
+  intern_sec_fraction = rb_intern("sec_fraction");
   intern_usec = rb_intern("usec");
   intern_sec = rb_intern("sec");
   intern_min = rb_intern("min");
@@ -501,4 +589,7 @@ void init_mysql2_statement() {
   intern_year = rb_intern("year");
 
   intern_to_s = rb_intern("to_s");
+#ifndef HAVE_RB_BIG_CMP
+  id_cmp = rb_intern("<=>");
+#endif
 }

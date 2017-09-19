@@ -19,6 +19,7 @@ module Mysql2
     end
 
     def initialize(opts = {})
+      fail Mysql2::Error, "Options parameter must be a Hash" unless opts.is_a? Hash
       opts = Mysql2::Util.key_hash_as_symbols(opts)
       @read_timeout = nil
       @query_options = self.class.default_query_options.dup
@@ -30,13 +31,13 @@ module Mysql2
       opts[:connect_timeout] = 120 unless opts.key?(:connect_timeout)
 
       # TODO: stricter validation rather than silent massaging
-      [:reconnect, :connect_timeout, :local_infile, :read_timeout, :write_timeout, :default_file, :default_group, :secure_auth, :init_command, :automatic_close].each do |key|
+      [:reconnect, :connect_timeout, :local_infile, :read_timeout, :write_timeout, :default_file, :default_group, :secure_auth, :init_command, :automatic_close, :enable_cleartext_plugin].each do |key|
         next unless opts.key?(key)
         case key
-        when :reconnect, :local_infile, :secure_auth, :automatic_close
+        when :reconnect, :local_infile, :secure_auth, :automatic_close, :enable_cleartext_plugin
           send(:"#{key}=", !!opts[key]) # rubocop:disable Style/DoubleNegation
         when :connect_timeout, :read_timeout, :write_timeout
-          send(:"#{key}=", opts[key]) unless opts[key].nil?
+          send(:"#{key}=", Integer(opts[key])) unless opts[key].nil?
         else
           send(:"#{key}=", opts[key])
         end
@@ -47,6 +48,7 @@ module Mysql2
 
       ssl_options = opts.values_at(:sslkey, :sslcert, :sslca, :sslcapath, :sslcipher)
       ssl_set(*ssl_options) if ssl_options.any?
+      self.ssl_mode = parse_ssl_mode(opts[:ssl_mode]) if opts[:ssl_mode]
 
       case opts[:flags]
       when Array
@@ -64,7 +66,7 @@ module Mysql2
 
       if [:user, :pass, :hostname, :dbname, :db, :sock].any? { |k| @query_options.key?(k) }
         warn "============= WARNING FROM mysql2 ============="
-        warn "The options :user, :pass, :hostname, :dbname, :db, and :sock will be deprecated at some point in the future."
+        warn "The options :user, :pass, :hostname, :dbname, :db, and :sock are deprecated and will be removed at some point in the future."
         warn "Instead, please use :username, :password, :host, :port, :database, :socket, :flags for the options."
         warn "============= END WARNING FROM mysql2 ========="
       end
@@ -85,6 +87,17 @@ module Mysql2
       socket = socket.to_s unless socket.nil?
 
       connect user, pass, host, port, database, socket, flags
+    end
+
+    def parse_ssl_mode(mode)
+      m = mode.to_s.upcase
+      if m.start_with?('SSL_MODE_')
+        return Mysql2::Client.const_get(m) if Mysql2::Client.const_defined?(m)
+      else
+        x = 'SSL_MODE_' + m
+        return Mysql2::Client.const_get(x) if Mysql2::Client.const_defined?(x)
+      end
+      warn "Unknown MySQL ssl_mode flag: #{mode}"
     end
 
     def parse_flags_array(flags, initial = 0)

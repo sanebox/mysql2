@@ -262,8 +262,8 @@ static void rb_mysql_result_alloc_result_buffers(VALUE self, MYSQL_FIELD *fields
   if (wrapper->result_buffers != NULL) return;
 
   wrapper->result_buffers = xcalloc(wrapper->numberOfFields, sizeof(MYSQL_BIND));
-  wrapper->is_null = xcalloc(wrapper->numberOfFields, sizeof(my_bool));
-  wrapper->error = xcalloc(wrapper->numberOfFields, sizeof(my_bool));
+  wrapper->is_null = xcalloc(wrapper->numberOfFields, sizeof(bool));
+  wrapper->error = xcalloc(wrapper->numberOfFields, sizeof(bool));
   wrapper->length = xcalloc(wrapper->numberOfFields, sizeof(unsigned long));
 
   for (i = 0; i < wrapper->numberOfFields; i++) {
@@ -920,6 +920,9 @@ static VALUE rb_mysql_result_each(int argc, VALUE * argv, VALUE self) {
     wrapper->numberOfRows = wrapper->stmt_wrapper ? mysql_stmt_num_rows(wrapper->stmt_wrapper->stmt) : mysql_num_rows(wrapper->result);
     wrapper->rows = rb_ary_new2(wrapper->numberOfRows);
   } else if (wrapper->rows && !cacheRows) {
+    if (wrapper->resultFreed) {
+      rb_raise(cMysql2Error, "Result set has already been freed");
+    }
     mysql_data_seek(wrapper->result, 0);
     wrapper->lastRowProcessed = 0;
     wrapper->rows = rb_ary_new2(wrapper->numberOfRows);

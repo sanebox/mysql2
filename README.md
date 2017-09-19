@@ -95,6 +95,9 @@ You may use MacPorts, Homebrew, or a native MySQL installer package. The most
 common paths will be automatically searched. If you want to select a specific
 MySQL directory, use the `--with-mysql-dir` or `--with-mysql-config` options above.
 
+If you have not done so already, you will need to install the XCode select tools by running
+`xcode-select --install`.
+
 ### Windows
 Make sure that you have Ruby and the DevKit compilers installed. We recommend
 the [Ruby Installer](http://rubyinstaller.org) distribution.
@@ -119,7 +122,7 @@ Connect to a database:
 ``` ruby
 # this takes a hash of options, almost all of which map directly
 # to the familiar database.yml in rails
-# See http://api.rubyonrails.org/classes/ActiveRecord/ConnectionAdapters/MysqlAdapter.html
+# See http://api.rubyonrails.org/classes/ActiveRecord/ConnectionAdapters/Mysql2Adapter.html
 client = Mysql2::Client.new(:host => "localhost", :username => "root")
 ```
 
@@ -174,8 +177,8 @@ by the query like this:
 ``` ruby
 headers = results.fields # <= that's an array of field names, in order
 results.each(:as => :array) do |row|
-# Each row is an array, ordered the same as the query results
-# An otter's den is called a "holt" or "couch"
+  # Each row is an array, ordered the same as the query results
+  # An otter's den is called a "holt" or "couch"
 end
 ```
 
@@ -213,12 +216,25 @@ Mysql2::Client.new(
   :reconnect = true/false,
   :local_infile = true/false,
   :secure_auth = true/false,
+  :ssl_mode = :disabled / :preferred / :required / :verify_ca / :verify_identity,
   :default_file = '/path/to/my.cfg',
   :default_group = 'my.cfg section',
   :init_command => sql
   )
 ```
 
+### Connecting to MySQL on localhost and elsewhere
+
+The underlying MySQL client library uses the `:host` parameter to determine the
+type of connection to make, with special interpretation you should be aware of:
+
+* An empty value or `"localhost"` will attempt a local connection:
+  * On Unix, connect to the default local socket path. (To set a custom socket
+    path, use the `:socket` parameter).
+  * On Windows, connect using a shared-memory connection, if enabled, or TCP.
+* A value of `"."` on Windows specifies a named-pipe connection.
+* An IPv4 or IPv6 address will result in a TCP connection.
+* Any other value will be looked up as a hostname for a TCP connection.
 
 ### SSL options
 
@@ -239,47 +255,6 @@ Mysql2::Client.new(
   :sslcipher => 'DHE-RSA-AES256-SHA',
   :sslverify => true,
   )
-```
-
-### Multiple result sets
-
-You can also retrieve multiple result sets. For this to work you need to
-connect with flags `Mysql2::Client::MULTI_STATEMENTS`. Multiple result sets can
-be used with stored procedures that return more than one result set, and for
-bundling several SQL statements into a single call to `client.query`.
-
-``` ruby
-client = Mysql2::Client.new(:host => "localhost", :username => "root", :flags => Mysql2::Client::MULTI_STATEMENTS)
-result = client.query('CALL sp_customer_list( 25, 10 )')
-# result now contains the first result set
-while client.next_result
-  result = client.store_result
-  # result now contains the next result set
-end
-```
-
-Repeated calls to `client.next_result` will return true, false, or raise an
-exception if the respective query erred. When `client.next_result` returns true,
-call `client.store_result` to retrieve a result object. Exceptions are not
-raised until `client.next_result` is called to find the status of the respective
-query. Subsequent queries are not executed if an earlier query raised an
-exception. Subsequent calls to `client.next_result` will return false.
-
-``` ruby
-result = client.query('SELECT 1; SELECT 2; SELECT A; SELECT 3')
-p result.first
-
-while client.next_result
-  result = client.store_result
-  p result.first
-end
-```
-
-Yields:
-```
-{"1"=>1}
-{"2"=>2}
-next_result: Unknown column 'A' in 'field list' (Mysql2::Error)
 ```
 
 ### Secure auth
@@ -336,6 +311,47 @@ It is useful if you want to provide session options which survive reconnection.
 
 ``` ruby
 Mysql2::Client.new(:init_command => "SET @@SESSION.sql_mode = 'STRICT_ALL_TABLES'")
+```
+
+### Multiple result sets
+
+You can also retrieve multiple result sets. For this to work you need to
+connect with flags `Mysql2::Client::MULTI_STATEMENTS`. Multiple result sets can
+be used with stored procedures that return more than one result set, and for
+bundling several SQL statements into a single call to `client.query`.
+
+``` ruby
+client = Mysql2::Client.new(:host => "localhost", :username => "root", :flags => Mysql2::Client::MULTI_STATEMENTS)
+result = client.query('CALL sp_customer_list( 25, 10 )')
+# result now contains the first result set
+while client.next_result
+  result = client.store_result
+  # result now contains the next result set
+end
+```
+
+Repeated calls to `client.next_result` will return true, false, or raise an
+exception if the respective query erred. When `client.next_result` returns true,
+call `client.store_result` to retrieve a result object. Exceptions are not
+raised until `client.next_result` is called to find the status of the respective
+query. Subsequent queries are not executed if an earlier query raised an
+exception. Subsequent calls to `client.next_result` will return false.
+
+``` ruby
+result = client.query('SELECT 1; SELECT 2; SELECT A; SELECT 3')
+p result.first
+
+while client.next_result
+  result = client.store_result
+  p result.first
+end
+```
+
+Yields:
+```
+{"1"=>1}
+{"2"=>2}
+next_result: Unknown column 'A' in 'field list' (Mysql2::Error)
 ```
 
 ## Cascading config
@@ -407,6 +423,15 @@ You can now tell Mysql2 to cast `tinyint(1)` fields to boolean values in Ruby wi
 client = Mysql2::Client.new
 result = client.query("SELECT * FROM table_with_boolean_field", :cast_booleans => true)
 ```
+
+Keep in mind that this works only with fields and not with computed values, e.g. this result will contain `1`, not `true`:
+
+``` ruby
+client = Mysql2::Client.new
+result = client.query("SELECT true", :cast_booleans => true)
+```
+
+CAST function wouldn't help here as there's no way to cast to TINYINT(1). Apparently the only way to solve this is to use a stored procedure with return type set to TINYINT(1).
 
 ### Skipping casting
 
@@ -494,13 +519,13 @@ As for field values themselves, I'm workin on it - but expect that soon.
 
 This gem is tested with the following Ruby versions on Linux and Mac OS X:
 
- * Ruby MRI 1.8.7, 1.9.3, 2.0.0, 2.1.x, 2.2.x, 2.3.x
+ * Ruby MRI 1.8.7, 1.9.3, 2.0.0, 2.1.x, 2.2.x, 2.3.x, 2.4.x
  * Ruby Enterprise Edition (based on MRI 1.8.7)
- * Rubinius 2.x, 3.x
+ * Rubinius 2.x and 3.x do work but may fail under some workloads
 
 This gem is tested with the following MySQL and MariaDB versions:
 
- * MySQL 5.5, 5.6, 5.7
+ * MySQL 5.5, 5.6, 5.7, 8.0
  * MySQL Connector/C 6.0 and 6.1 (primarily on Windows)
  * MariaDB 5.5, 10.0, 10.1
 

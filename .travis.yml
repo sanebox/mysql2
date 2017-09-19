@@ -2,9 +2,11 @@ sudo: required
 dist: trusty
 language: ruby
 bundler_args: --without benchmarks development
-# Temporary workaround for broken Rubygems on Travis
+# Pin Rubygems to a working version. Sometimes it breaks upstream. Update now and then.
 before_install:
-  - gem update --system 2.4.8
+  - gem --version
+  - gem update --system 2.6.12
+  - gem update bundler
   - gem --version
   - bash .travis_setup.sh
 addons:
@@ -12,11 +14,12 @@ addons:
     - mysql2gem.example.com
   apt:
     packages:
-    - mysql-server-5.5
-    - mysql-client-core-5.5
-    - mysql-client-5.5
+    - mysql-server-5.6
+    - mysql-client-core-5.6
+    - mysql-client-5.6
 rvm:
-  - 2.3.0
+  - 2.4
+  - 2.3
   - 2.2
   - 2.1
   - 2.0.0
@@ -26,50 +29,88 @@ matrix:
   include:
     - rvm: 1.8.7
       dist: precise
-    - rvm: ree
-      dist: precise
-    - rvm: rbx-2
-      dist: precise
-    - rvm: 2.0.0
-      env: DB=mariadb55
+      env: SPEC_OPTS="--order rand:11"
       addons:
-        mariadb: 5.5
         hosts:
           - mysql2gem.example.com
-    - rvm: 2.0.0
+        apt:
+          packages:
+          - mysql-server-5.5
+          - mysql-client-core-5.5
+          - mysql-client-5.5
+    - rvm: ree
+      dist: precise
+      env: SPEC_OPTS="--order rand:11"
+      addons:
+        hosts:
+          - mysql2gem.example.com
+        apt:
+          packages:
+          - mysql-server-5.5
+          - mysql-client-core-5.5
+          - mysql-client-5.5
+    - rvm: 2.4
       env: DB=mariadb10.0
       addons:
         mariadb: 10.0
         hosts:
           - mysql2gem.example.com
-    - rvm: 2.0.0
+    - rvm: 2.4
       env: DB=mariadb10.1
       addons:
         mariadb: 10.1
         hosts:
           - mysql2gem.example.com
+    - rvm: 2.4
+      env: DB=mariadb10.2
+      addons:
+        mariadb: 10.2
+        hosts:
+          - mysql2gem.example.com
     - rvm: 2.0.0
-      env: DB=mysql56
+      env: DB=mysql51
+      dist: precise
+      addons:
+        hosts:
+          - mysql2gem.example.com
+    - rvm: 2.0.0
+      env: DB=mysql55
+      dist: precise
       addons:
         hosts:
           - mysql2gem.example.com
         apt:
           packages:
-          - mysql-server-5.6
-          - mysql-client-core-5.6
-          - mysql-client-5.6
-    - rvm: 2.0.0
+          - mysql-server-5.5
+          - mysql-client-core-5.5
+          - mysql-client-5.5
+    - rvm: 2.4
       env: DB=mysql57
       addons:
         hosts:
           - mysql2gem.example.com
-        apt:
-          packages:
-          - mysql-server-5.7
-          - mysql-client-core-5.7
-          - mysql-client-5.7
-    - rvm: 2.0.0
-      env: DB=mysql55
-      os: osx
+    - rvm: 2.4
+      env: DB=mysql80
+      addons:
+        hosts:
+          - mysql2gem.example.com
+    - os: osx
+      rvm: system
+      env: DB=mysql56
+      addons:
+        hosts:
+          - mysql2gem.example.com
+      before_install:
+        # Use the system RubyGem with the system Ruby
+        - gem --version
+        - sudo gem install bundler
+        - bash .travis_setup.sh
+  fast_finish: true
   allow_failures:
     - rvm: ruby-head
+    - os: osx
+      rvm: system
+      env: DB=mysql56
+    - rvm: 2.0.0
+      env: DB=mysql51
+      dist: precise

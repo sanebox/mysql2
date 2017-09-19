@@ -3,14 +3,16 @@ require './spec/spec_helper.rb'
 
 RSpec.describe Mysql2::Statement do
   before :each do
-    @client = Mysql2::Client.new(DatabaseCredentials['root'].merge(:encoding => "utf8"))
+    @client = new_client(:encoding => "utf8")
+  end
+
+  def stmt_count
+    @client.query("SHOW STATUS LIKE 'Prepared_stmt_count'").first['Value'].to_i
   end
 
   it "should create a statement" do
     statement = nil
-    expect { statement = @client.prepare 'SELECT 1' }.to change {
-      @client.query("SHOW STATUS LIKE 'Prepared_stmt_count'").first['Value'].to_i
-    }.by(1)
+    expect { statement = @client.prepare 'SELECT 1' }.to change(&method(:stmt_count)).by(1)
     expect(statement).to be_an_instance_of(Mysql2::Statement)
   end
 
@@ -57,6 +59,32 @@ RSpec.describe Mysql2::Statement do
     rows = []
     result.each { |r| rows << r }
     expect(rows).to eq([{ "1" => 1 }])
+  end
+
+  it "should handle booleans" do
+    stmt = @client.prepare('SELECT ? AS `true`, ? AS `false`')
+    result = stmt.execute(true, false)
+    expect(result.to_a).to eq(['true' => 1, 'false' => 0])
+  end
+
+  it "should handle bignum but in int64_t" do
+    stmt = @client.prepare('SELECT ? AS max, ? AS min')
+    int64_max = (1 << 63) - 1
+    int64_min = -(1 << 63)
+    result = stmt.execute(int64_max, int64_min)
+    expect(result.to_a).to eq(['max' => int64_max, 'min' => int64_min])
+  end
+
+  it "should handle bignum but beyond int64_t" do
+    stmt = @client.prepare('SELECT ? AS max1, ? AS max2, ? AS max3, ? AS min1, ? AS min2, ? AS min3')
+    int64_max1 = (1 << 63)
+    int64_max2 = (1 << 64) - 1
+    int64_max3 = 1 << 64
+    int64_min1 = -(1 << 63) - 1
+    int64_min2 = -(1 << 64) + 1
+    int64_min3 = -0xC000000000000000
+    result = stmt.execute(int64_max1, int64_max2, int64_max3, int64_min1, int64_min2, int64_min3)
+    expect(result.to_a).to eq(['max1' => int64_max1, 'max2' => int64_max2, 'max3' => int64_max3, 'min1' => int64_min1, 'min2' => int64_min2, 'min3' => int64_min3])
   end
 
   it "should keep its result after other query" do
@@ -108,6 +136,35 @@ RSpec.describe Mysql2::Statement do
     expect(result.first.first[1]).to be_an_instance_of(Time)
   end
 
+  it "should prepare Date values" do
+    now = Date.today
+    statement = @client.prepare('SELECT ? AS a')
+    result = statement.execute(now)
+    expect(result.first['a'].to_s).to eql(now.strftime('%F'))
+  end
+
+  it "should prepare Time values with microseconds" do
+    now = Time.now
+    statement = @client.prepare('SELECT ? AS a')
+    result = statement.execute(now)
+    if RUBY_VERSION =~ /1.8/
+      expect(result.first['a'].strftime('%F %T %z')).to eql(now.strftime('%F %T %z'))
+    else
+      expect(result.first['a'].strftime('%F %T.%6N %z')).to eql(now.strftime('%F %T.%6N %z'))
+    end
+  end
+
+  it "should prepare DateTime values with microseconds" do
+    now = DateTime.now
+    statement = @client.prepare('SELECT ? AS a')
+    result = statement.execute(now)
+    if RUBY_VERSION =~ /1.8/
+      expect(result.first['a'].strftime('%F %T %z')).to eql(now.strftime('%F %T %z'))
+    else
+      expect(result.first['a'].strftime('%F %T.%6N %z')).to eql(now.strftime('%F %T.%6N %z'))
+    end
+  end
+
   it "should tell us about the fields" do
     statement = @client.prepare 'SELECT 1 as foo, 2'
     statement.execute
@@ -115,6 +172,13 @@ RSpec.describe Mysql2::Statement do
     expect(list.length).to eq(2)
     expect(list.first).to eq('foo')
     expect(list[1]).to eq('2')
+  end
+
+  it "should handle as a decimal binding a BigDecimal" do
+    stmt = @client.prepare('SELECT ? AS decimal_test')
+    test_result = stmt.execute(BigDecimal.new("123.45")).first
+    expect(test_result['decimal_test']).to be_an_instance_of(BigDecimal)
+    expect(test_result['decimal_test']).to eql(123.45)
   end
 
   it "should update a DECIMAL value passing a BigDecimal" do
@@ -268,18 +332,19 @@ RSpec.describe Mysql2::Statement do
   end
 
   context "#fields" do
-    before(:each) do
-      @client.query "USE test"
-      @test_result = @client.prepare("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1").execute
-    end
-
     it "method should exist" do
-      expect(@test_result).to respond_to(:fields)
+      stmt = @client.prepare("SELECT 1")
+      expect(stmt).to respond_to(:fields)
     end
 
     it "should return an array of field names in proper order" do
-      result = @client.prepare("SELECT 'a', 'b', 'c'").execute
-      expect(result.fields).to eql(%w(a b c))
+      stmt = @client.prepare("SELECT 'a', 'b', 'c'")
+      expect(stmt.fields).to eql(%w(a b c))
+    end
+
+    it "should return nil for statement with no result fields" do
+      stmt = @client.prepare("INSERT INTO mysql2_test () VALUES ()")
+      expect(stmt.fields).to eql(nil)
     end
   end
 
@@ -466,10 +531,9 @@ RSpec.describe Mysql2::Statement do
           result = @client.query("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1").first
           expect(result['enum_test'].encoding).to eql(Encoding::UTF_8)
 
-          client2 = Mysql2::Client.new(DatabaseCredentials['root'].merge(:encoding => 'ascii'))
+          client2 = new_client(:encoding => 'ascii')
           result = client2.query("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1").first
           expect(result['enum_test'].encoding).to eql(Encoding::US_ASCII)
-          client2.close
         end
       end
 
@@ -499,10 +563,9 @@ RSpec.describe Mysql2::Statement do
           result = @client.query("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1").first
           expect(result['set_test'].encoding).to eql(Encoding::UTF_8)
 
-          client2 = Mysql2::Client.new(DatabaseCredentials['root'].merge(:encoding => 'ascii'))
+          client2 = new_client(:encoding => 'ascii')
           result = client2.query("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1").first
           expect(result['set_test'].encoding).to eql(Encoding::US_ASCII)
-          client2.close
         end
       end
 
@@ -593,10 +656,9 @@ RSpec.describe Mysql2::Statement do
               result = @client.query("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1").first
               expect(result[field].encoding).to eql(Encoding::UTF_8)
 
-              client2 = Mysql2::Client.new(DatabaseCredentials['root'].merge(:encoding => 'ascii'))
+              client2 = new_client(:encoding => 'ascii')
               result = client2.query("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1").first
               expect(result[field].encoding).to eql(Encoding::US_ASCII)
-              client2.close
             end
           end
 
@@ -689,9 +751,7 @@ RSpec.describe Mysql2::Statement do
   context 'close' do
     it 'should free server resources' do
       stmt = @client.prepare 'SELECT 1'
-      expect { stmt.close }.to change {
-        @client.query("SHOW STATUS LIKE 'Prepared_stmt_count'").first['Value'].to_i
-      }.by(-1)
+      expect { stmt.close }.to change(&method(:stmt_count)).by(-1)
     end
 
     it 'should raise an error on subsequent execution' do

@@ -6,7 +6,7 @@ apt-get purge -qq '^mysql*' '^libmysql*'
 rm -fr /etc/mysql
 rm -fr /var/lib/mysql
 apt-key adv --keyserver pgp.mit.edu --recv-keys 5072E1F5
-add-apt-repository 'deb http://repo.mysql.com/apt/ubuntu/ trusty mysql-5.7'
+add-apt-repository 'deb http://repo.mysql.com/apt/ubuntu/ trusty mysql-8.0'
 apt-get update -qq
 apt-get install -qq mysql-server libmysqlclient-dev
 

@@ -1,7 +1,7 @@
 require 'rake/clean'
 require 'rake/extensioncompiler'
 
-CONNECTOR_VERSION = "6.1.6" # NOTE: Track the upstream version from time to time
+CONNECTOR_VERSION = "6.1.11" # NOTE: Track the upstream version from time to time
 
 def vendor_mysql_platform(platform = nil)
   platform ||= RUBY_PLATFORM
@@ -49,9 +49,9 @@ task "vendor:mysql", [:platform] do |_t, args|
     when_writing "creating #{t.name}" do
       cd "vendor" do
         sh "unzip", "-uq", full_file,
-           "#{vendor_mysql_dir(args[:platform])}/bin/\\*\\*",
-           "#{vendor_mysql_dir(args[:platform])}/include/\\*\\*",
-           "#{vendor_mysql_dir(args[:platform])}/lib/\\*\\*",
+           "#{vendor_mysql_dir(args[:platform])}/bin/**",
+           "#{vendor_mysql_dir(args[:platform])}/include/**",
+           "#{vendor_mysql_dir(args[:platform])}/lib/**",
            "#{vendor_mysql_dir(args[:platform])}/README" # contains the license info
       end
       # update file timestamp to avoid Rake performing this extraction again.
