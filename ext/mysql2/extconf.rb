@@ -1,4 +1,5 @@
 # encoding: UTF-8
+
 require 'mkmf'
 require 'English'
 
@@ -13,7 +14,7 @@ def asplode(lib)
 end
 
 def add_ssl_defines(header)
-  all_modes_found = %w(SSL_MODE_DISABLED SSL_MODE_PREFERRED SSL_MODE_REQUIRED SSL_MODE_VERIFY_CA SSL_MODE_VERIFY_IDENTITY).inject(true) do |m, ssl_mode|
+  all_modes_found = %w[SSL_MODE_DISABLED SSL_MODE_PREFERRED SSL_MODE_REQUIRED SSL_MODE_VERIFY_CA SSL_MODE_VERIFY_IDENTITY].inject(true) do |m, ssl_mode|
     m && have_const(ssl_mode, header)
   end
   $CFLAGS << ' -DFULL_SSL_MODE_SUPPORT' if all_modes_found
@@ -29,16 +30,12 @@ have_func('rb_absint_singlebit_p')
 # 2.0-only
 have_header('ruby/thread.h') && have_func('rb_thread_call_without_gvl', 'ruby/thread.h')
 
-# 1.9-only
-have_func('rb_thread_blocking_region')
+# Missing in RBX (https://github.com/rubinius/rubinius/issues/3771)
 have_func('rb_wait_for_single_fd')
-have_func('rb_hash_dup')
-have_func('rb_intern3')
-have_func('rb_big_cmp')
 
 # borrowed from mysqlplus
 # http://github.com/oldmoe/mysqlplus/blob/master/ext/extconf.rb
-dirs = ENV.fetch('PATH').split(File::PATH_SEPARATOR) + %w(
+dirs = ENV.fetch('PATH').split(File::PATH_SEPARATOR) + %w[
   /opt
   /opt/local
   /opt/local/mysql
@@ -50,12 +47,12 @@ dirs = ENV.fetch('PATH').split(File::PATH_SEPARATOR) + %w(
   /usr/local/mysql-*
   /usr/local/lib/mysql5*
   /usr/local/opt/mysql5*
-).map { |dir| dir << '/bin' }
+].map { |dir| dir << '/bin' }
 
 # For those without HOMEBREW_ROOT in PATH
 dirs << "#{ENV['HOMEBREW_ROOT']}/bin" if ENV['HOMEBREW_ROOT']
 
-GLOB = "{#{dirs.join(',')}}/{mysql_config,mysql_config5,mariadb_config}"
+GLOB = "{#{dirs.join(',')}}/{mysql_config,mysql_config5,mariadb_config}".freeze
 
 # If the user has provided a --with-mysql-dir argument, we must respect it or fail.
 inc, lib = dir_config('mysql')
@@ -92,7 +89,7 @@ elsif (mc = (with_config('mysql-config') || Dir[GLOB].first))
 else
   _, usr_local_lib = dir_config('mysql', '/usr/local')
 
-  asplode("mysql client") unless find_library('mysqlclient', 'mysql_query', usr_local_lib, "#{usr_local_lib}/mysql")
+  asplode("mysql client") unless find_library('mysqlclient', nil, usr_local_lib, "#{usr_local_lib}/mysql")
 
   rpath_dir = usr_local_lib
 end
@@ -105,8 +102,8 @@ else
   asplode 'mysql.h'
 end
 
-%w(errmsg.h mysqld_error.h).each do |h|
-  header = [prefix, h].compact.join '/'
+%w[errmsg.h].each do |h|
+  header = [prefix, h].compact.join('/')
   asplode h unless have_header header
 end
 
@@ -114,7 +111,12 @@ mysql_h = [prefix, 'mysql.h'].compact.join('/')
 add_ssl_defines(mysql_h)
 have_struct_member('MYSQL', 'net.vio', mysql_h)
 have_struct_member('MYSQL', 'net.pvio', mysql_h)
+# These constants are actually enums, so they cannot be detected by #ifdef in C code.
 have_const('MYSQL_ENABLE_CLEARTEXT_PLUGIN', mysql_h)
+have_const('SERVER_QUERY_NO_GOOD_INDEX_USED', mysql_h)
+have_const('SERVER_QUERY_NO_INDEX_USED', mysql_h)
+have_const('SERVER_QUERY_WAS_SLOW', mysql_h)
+have_const('MYSQL_OPT_CONNECT_ATTR_ADD', mysql_h) # for mysql_options4
 
 # This is our wishlist. We use whichever flags work on the host.
 # -Wall and -Wextra are included by default.
@@ -150,7 +152,7 @@ sanitizers = with_config('sanitize')
 case sanitizers
 when true
   # Try them all, turn on whatever we can
-  enabled_sanitizers = %w(address cfi integer memory thread undefined).select do |s|
+  enabled_sanitizers = %w[address cfi integer memory thread undefined].select do |s|
     try_link('int main() {return 0;}',  "-Werror -fsanitize=#{s}")
   end
   abort "-----\nCould not enable any sanitizers!\n-----" if enabled_sanitizers.empty?
@@ -178,7 +180,7 @@ unless enabled_sanitizers.empty?
   $CFLAGS << ' -g -fno-omit-frame-pointer'
 end
 
-if RUBY_PLATFORM =~ /mswin|mingw/
+if RUBY_PLATFORM =~ /mswin|mingw/ && !defined?(RubyInstaller)
   # Build libmysql.a interface link library
   require 'rake'
 

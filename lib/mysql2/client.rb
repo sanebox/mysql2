@@ -1,25 +1,27 @@
+# encoding: UTF-8
+
 module Mysql2
   class Client
     attr_reader :query_options, :read_timeout
 
     def self.default_query_options
       @default_query_options ||= {
-        :as => :hash,                   # the type of object you want each row back as; also supports :array (an array of values)
-        :async => false,                # don't wait for a result after sending the query, you'll have to monitor the socket yourself then eventually call Mysql2::Client#async_result
-        :cast_booleans => false,        # cast tinyint(1) fields as true/false in ruby
-        :symbolize_keys => false,       # return field names as symbols instead of strings
-        :database_timezone => :local,   # timezone Mysql2 will assume datetime objects are stored in
-        :application_timezone => nil,   # timezone Mysql2 will convert to before handing the object back to the caller
-        :cache_rows => true,            # tells Mysql2 to use its internal row cache for results
-        :connect_flags => REMEMBER_OPTIONS | LONG_PASSWORD | LONG_FLAG | TRANSACTIONS | PROTOCOL_41 | SECURE_CONNECTION,
-        :cast => true,
-        :default_file => nil,
-        :default_group => nil,
+        as: :hash,                   # the type of object you want each row back as; also supports :array (an array of values)
+        async: false,                # don't wait for a result after sending the query, you'll have to monitor the socket yourself then eventually call Mysql2::Client#async_result
+        cast_booleans: false,        # cast tinyint(1) fields as true/false in ruby
+        symbolize_keys: false,       # return field names as symbols instead of strings
+        database_timezone: :local,   # timezone Mysql2 will assume datetime objects are stored in
+        application_timezone: nil,   # timezone Mysql2 will convert to before handing the object back to the caller
+        cache_rows: true,            # tells Mysql2 to use its internal row cache for results
+        connect_flags: REMEMBER_OPTIONS | LONG_PASSWORD | LONG_FLAG | TRANSACTIONS | PROTOCOL_41 | SECURE_CONNECTION,
+        cast: true,
+        default_file: nil,
+        default_group: nil,
       }
     end
 
     def initialize(opts = {})
-      fail Mysql2::Error, "Options parameter must be a Hash" unless opts.is_a? Hash
+      raise Mysql2::Error, "Options parameter must be a Hash" unless opts.is_a? Hash
       opts = Mysql2::Util.key_hash_as_symbols(opts)
       @read_timeout = nil
       @query_options = self.class.default_query_options.dup
@@ -47,22 +49,27 @@ module Mysql2
       self.charset_name = opts[:encoding] || 'utf8'
 
       ssl_options = opts.values_at(:sslkey, :sslcert, :sslca, :sslcapath, :sslcipher)
-      ssl_set(*ssl_options) if ssl_options.any?
+      ssl_set(*ssl_options) if ssl_options.any? || opts.key?(:sslverify)
       self.ssl_mode = parse_ssl_mode(opts[:ssl_mode]) if opts[:ssl_mode]
 
-      case opts[:flags]
+      flags = case opts[:flags]
       when Array
-        flags = parse_flags_array(opts[:flags], @query_options[:connect_flags])
+        parse_flags_array(opts[:flags], @query_options[:connect_flags])
       when String
-        flags = parse_flags_array(opts[:flags].split(' '), @query_options[:connect_flags])
+        parse_flags_array(opts[:flags].split(' '), @query_options[:connect_flags])
       when Integer
-        flags = @query_options[:connect_flags] | opts[:flags]
+        @query_options[:connect_flags] | opts[:flags]
       else
-        flags = @query_options[:connect_flags]
+        @query_options[:connect_flags]
       end
 
       # SSL verify is a connection flag rather than a mysql_ssl_set option
-      flags |= SSL_VERIFY_SERVER_CERT if opts[:sslverify] && ssl_options.any?
+      flags |= SSL_VERIFY_SERVER_CERT if opts[:sslverify]
+
+      # Set default program_name in performance_schema.session_connect_attrs
+      # and performance_schema.session_account_connect_attrs
+      conn_attrs = opts[:connect_attrs] || {}
+      conn_attrs[:program_name] = $PROGRAM_NAME unless conn_attrs.key?(:program_name)
 
       if [:user, :pass, :hostname, :dbname, :db, :sock].any? { |k| @query_options.key?(k) }
         warn "============= WARNING FROM mysql2 ============="
@@ -85,8 +92,11 @@ module Mysql2
       port = port.to_i unless port.nil?
       database = database.to_s unless database.nil?
       socket = socket.to_s unless socket.nil?
+      conn_attrs = conn_attrs.each_with_object({}) do |(key, value), hash|
+        hash[key.to_s] = value.to_s
+      end
 
-      connect user, pass, host, port, database, socket, flags
+      connect user, pass, host, port, database, socket, flags, conn_attrs
     end
 
     def parse_ssl_mode(mode)
@@ -116,7 +126,7 @@ module Mysql2
 
     if Thread.respond_to?(:handle_interrupt)
       def query(sql, options = {})
-        Thread.handle_interrupt(::Mysql2::Util::TimeoutError => :never) do
+        Thread.handle_interrupt(::Mysql2::Util::TIMEOUT_ERROR_CLASS => :never) do
           _query(sql, @query_options.merge(options))
         end
       end

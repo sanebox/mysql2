@@ -11,21 +11,19 @@ void Init_mysql2(void);
 
 #ifdef HAVE_MYSQL_H
 #include <mysql.h>
-#include <mysql_com.h>
 #include <errmsg.h>
-#include <mysqld_error.h>
-#include <mysql_version.h>
 #else
 #include <mysql/mysql.h>
-#include <mysql/mysql_com.h>
 #include <mysql/errmsg.h>
-#include <mysql/mysqld_error.h>
-#include <mysql/mysql_version.h>
 #endif
 
-#ifdef HAVE_RUBY_ENCODING_H
 #include <ruby/encoding.h>
-#endif
+// ruby/thread.h was added in 2.0.0. See:
+// https://github.com/ruby/ruby/commit/c51a826
+//
+// Rubinius doesn't define this, but it ships an empty thread.h (the symbols we
+// care about are in ruby.h); this is safe to remove when < 2.0.0 is no longer
+// supported.
 #ifdef HAVE_RUBY_THREAD_H
 #include <ruby/thread.h>
 #endif

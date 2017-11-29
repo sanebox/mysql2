@@ -1,9 +1,10 @@
 # encoding: UTF-8
+
 require './spec/spec_helper.rb'
 
 RSpec.describe Mysql2::Statement do
   before :each do
-    @client = new_client(:encoding => "utf8")
+    @client = new_client(encoding: "utf8")
   end
 
   def stmt_count
@@ -147,22 +148,16 @@ RSpec.describe Mysql2::Statement do
     now = Time.now
     statement = @client.prepare('SELECT ? AS a')
     result = statement.execute(now)
-    if RUBY_VERSION =~ /1.8/
-      expect(result.first['a'].strftime('%F %T %z')).to eql(now.strftime('%F %T %z'))
-    else
-      expect(result.first['a'].strftime('%F %T.%6N %z')).to eql(now.strftime('%F %T.%6N %z'))
-    end
+    # microseconds is six digits after the decimal, but only test on 5 significant figures
+    expect(result.first['a'].strftime('%F %T.%5N %z')).to eql(now.strftime('%F %T.%5N %z'))
   end
 
   it "should prepare DateTime values with microseconds" do
     now = DateTime.now
     statement = @client.prepare('SELECT ? AS a')
     result = statement.execute(now)
-    if RUBY_VERSION =~ /1.8/
-      expect(result.first['a'].strftime('%F %T %z')).to eql(now.strftime('%F %T %z'))
-    else
-      expect(result.first['a'].strftime('%F %T.%6N %z')).to eql(now.strftime('%F %T.%6N %z'))
-    end
+    # microseconds is six digits after the decimal, but only test on 5 significant figures
+    expect(result.first['a'].strftime('%F %T.%5N %z')).to eql(now.strftime('%F %T.%5N %z'))
   end
 
   it "should tell us about the fields" do
@@ -193,7 +188,7 @@ RSpec.describe Mysql2::Statement do
   end
 
   it "should warn but still work if cache_rows is set to false" do
-    @client.query_options.merge!(:cache_rows => false)
+    @client.query_options[:cache_rows] = false
     statement = @client.prepare 'SELECT 1'
     result = nil
     expect { result = statement.execute.to_a }.to output(/:cache_rows is forced for prepared statements/).to_stderr
@@ -215,7 +210,7 @@ RSpec.describe Mysql2::Statement do
 
     it "should be able to retrieve utf8 field names correctly" do
       stmt = @client.prepare 'SELECT * FROM `テーブル`'
-      expect(stmt.fields).to eq(%w(整数 文字列))
+      expect(stmt.fields).to eq(%w[整数 文字列])
       result = stmt.execute
 
       expect(result.to_a).to eq([{ "整数" => 1, "文字列" => "イチ" }, { "整数" => 2, "文字列" => "弐" }, { "整数" => 3, "文字列" => "さん" }])
@@ -239,14 +234,14 @@ RSpec.describe Mysql2::Statement do
 
       expect(result.to_a).to eq([{ "整数" => 1 }])
     end
-  end if defined? Encoding
+  end
 
   context "streaming result" do
     it "should be able to stream query result" do
       n = 1
       stmt = @client.prepare("SELECT 1 UNION SELECT 2")
 
-      @client.query_options.merge!(:stream => true, :cache_rows => false, :as => :array)
+      @client.query_options.merge!(stream: true, cache_rows: false, as: :array)
 
       stmt.execute.each do |r|
         case n
@@ -321,10 +316,10 @@ RSpec.describe Mysql2::Statement do
 
       result = @client.prepare("SELECT 1 UNION SELECT 2").execute
 
-      expect {
+      expect do
         result.each {}
         result.each {}
-      }.to raise_exception(Mysql2::Error)
+      end.to raise_exception(Mysql2::Error)
 
       @client.query_options[:stream] = false
       @client.query_options[:cache_rows] = true
@@ -339,7 +334,7 @@ RSpec.describe Mysql2::Statement do
 
     it "should return an array of field names in proper order" do
       stmt = @client.prepare("SELECT 'a', 'b', 'c'")
-      expect(stmt.fields).to eql(%w(a b c))
+      expect(stmt.fields).to eql(%w[a b c])
     end
 
     it "should return nil for statement with no result fields" do
@@ -370,64 +365,75 @@ RSpec.describe Mysql2::Statement do
     end
 
     it "should return Fixnum for a TINYINT value" do
-      expect([Fixnum, Bignum]).to include(@test_result['tiny_int_test'].class)
+      expect(num_classes).to include(@test_result['tiny_int_test'].class)
       expect(@test_result['tiny_int_test']).to eql(1)
     end
 
-    it "should return TrueClass or FalseClass for a TINYINT value if :cast_booleans is enabled" do
-      @client.query 'INSERT INTO mysql2_test (bool_cast_test) VALUES (1)'
-      id1 = @client.last_id
-      @client.query 'INSERT INTO mysql2_test (bool_cast_test) VALUES (0)'
-      id2 = @client.last_id
-      @client.query 'INSERT INTO mysql2_test (bool_cast_test) VALUES (-1)'
-      id3 = @client.last_id
+    context "cast booleans for TINYINT if :cast_booleans is enabled" do
+      # rubocop:disable Style/Semicolon
+      let(:client) { new_client(cast_booleans: true) }
+      let(:id1) { client.query 'INSERT INTO mysql2_test (bool_cast_test) VALUES ( 1)'; client.last_id }
+      let(:id2) { client.query 'INSERT INTO mysql2_test (bool_cast_test) VALUES ( 0)'; client.last_id }
+      let(:id3) { client.query 'INSERT INTO mysql2_test (bool_cast_test) VALUES (-1)'; client.last_id }
+      # rubocop:enable Style/Semicolon
 
-      result1 = @client.query 'SELECT bool_cast_test FROM mysql2_test WHERE bool_cast_test = 1 LIMIT 1', :cast_booleans => true
-      result2 = @client.query 'SELECT bool_cast_test FROM mysql2_test WHERE bool_cast_test = 0 LIMIT 1', :cast_booleans => true
-      result3 = @client.query 'SELECT bool_cast_test FROM mysql2_test WHERE bool_cast_test = -1 LIMIT 1', :cast_booleans => true
-      expect(result1.first['bool_cast_test']).to be true
-      expect(result2.first['bool_cast_test']).to be false
-      expect(result3.first['bool_cast_test']).to be true
+      after do
+        client.query "DELETE from mysql2_test WHERE id IN(#{id1},#{id2},#{id3})"
+      end
 
-      @client.query "DELETE from mysql2_test WHERE id IN(#{id1},#{id2},#{id3})"
+      it "should return TrueClass or FalseClass for a TINYINT value if :cast_booleans is enabled" do
+        query = client.prepare 'SELECT bool_cast_test FROM mysql2_test WHERE id = ?'
+        result1 = query.execute id1
+        result2 = query.execute id2
+        result3 = query.execute id3
+        expect(result1.first['bool_cast_test']).to be true
+        expect(result2.first['bool_cast_test']).to be false
+        expect(result3.first['bool_cast_test']).to be true
+      end
     end
 
-    it "should return TrueClass or FalseClass for a BIT(1) value if :cast_booleans is enabled" do
-      @client.query 'INSERT INTO mysql2_test (single_bit_test) VALUES (1)'
-      id1 = @client.last_id
-      @client.query 'INSERT INTO mysql2_test (single_bit_test) VALUES (0)'
-      id2 = @client.last_id
+    context "cast booleans for BIT(1) if :cast_booleans is enabled" do
+      # rubocop:disable Style/Semicolon
+      let(:client) { new_client(cast_booleans: true) }
+      let(:id1) { client.query 'INSERT INTO mysql2_test (single_bit_test) VALUES (1)'; client.last_id }
+      let(:id2) { client.query 'INSERT INTO mysql2_test (single_bit_test) VALUES (0)'; client.last_id }
+      # rubocop:enable Style/Semicolon
 
-      result1 = @client.query "SELECT single_bit_test FROM mysql2_test WHERE id = #{id1}", :cast_booleans => true
-      result2 = @client.query "SELECT single_bit_test FROM mysql2_test WHERE id = #{id2}", :cast_booleans => true
-      expect(result1.first['single_bit_test']).to be true
-      expect(result2.first['single_bit_test']).to be false
+      after do
+        client.query "DELETE from mysql2_test WHERE id IN(#{id1},#{id2})"
+      end
 
-      @client.query "DELETE from mysql2_test WHERE id IN(#{id1},#{id2})"
+      it "should return TrueClass or FalseClass for a BIT(1) value if :cast_booleans is enabled" do
+        query = client.prepare 'SELECT single_bit_test FROM mysql2_test WHERE id = ?'
+        result1 = query.execute id1
+        result2 = query.execute id2
+        expect(result1.first['single_bit_test']).to be true
+        expect(result2.first['single_bit_test']).to be false
+      end
     end
 
     it "should return Fixnum for a SMALLINT value" do
-      expect([Fixnum, Bignum]).to include(@test_result['small_int_test'].class)
+      expect(num_classes).to include(@test_result['small_int_test'].class)
       expect(@test_result['small_int_test']).to eql(10)
     end
 
     it "should return Fixnum for a MEDIUMINT value" do
-      expect([Fixnum, Bignum]).to include(@test_result['medium_int_test'].class)
+      expect(num_classes).to include(@test_result['medium_int_test'].class)
       expect(@test_result['medium_int_test']).to eql(10)
     end
 
     it "should return Fixnum for an INT value" do
-      expect([Fixnum, Bignum]).to include(@test_result['int_test'].class)
+      expect(num_classes).to include(@test_result['int_test'].class)
       expect(@test_result['int_test']).to eql(10)
     end
 
     it "should return Fixnum for a BIGINT value" do
-      expect([Fixnum, Bignum]).to include(@test_result['big_int_test'].class)
+      expect(num_classes).to include(@test_result['big_int_test'].class)
       expect(@test_result['big_int_test']).to eql(10)
     end
 
     it "should return Fixnum for a YEAR value" do
-      expect([Fixnum, Bignum]).to include(@test_result['year_test'].class)
+      expect(num_classes).to include(@test_result['year_test'].class)
       expect(@test_result['year_test']).to eql(2009)
     end
 
@@ -451,51 +457,14 @@ RSpec.describe Mysql2::Statement do
       expect(@test_result['date_time_test'].strftime("%Y-%m-%d %H:%M:%S")).to eql('2010-04-04 11:44:00')
     end
 
-    if 1.size == 4 # 32bit
-      klass = if RUBY_VERSION =~ /1.8/
-        DateTime
-      else
-        Time
-      end
+    it "should return Time when timestamp is < 1901-12-13 20:45:52" do
+      r = @client.prepare("SELECT CAST('1901-12-13 20:45:51' AS DATETIME) as test").execute
+      expect(r.first['test']).to be_an_instance_of(Time)
+    end
 
-      it "should return DateTime when timestamp is < 1901-12-13 20:45:52" do
-        # 1901-12-13T20:45:52 is the min for 32bit Ruby 1.8
-        r = @client.query("SELECT CAST('1901-12-13 20:45:51' AS DATETIME) as test")
-        expect(r.first['test']).to be_an_instance_of(klass)
-      end
-
-      it "should return DateTime when timestamp is > 2038-01-19T03:14:07" do
-        # 2038-01-19T03:14:07 is the max for 32bit Ruby 1.8
-        r = @client.query("SELECT CAST('2038-01-19 03:14:08' AS DATETIME) as test")
-        expect(r.first['test']).to be_an_instance_of(klass)
-      end
-    elsif 1.size == 8 # 64bit
-      if RUBY_VERSION =~ /1.8/
-        it "should return Time when timestamp is > 0138-12-31 11:59:59" do
-          r = @client.query("SELECT CAST('0139-1-1 00:00:00' AS DATETIME) as test")
-          expect(r.first['test']).to be_an_instance_of(Time)
-        end
-
-        it "should return DateTime when timestamp is < 0139-1-1T00:00:00" do
-          r = @client.query("SELECT CAST('0138-12-31 11:59:59' AS DATETIME) as test")
-          expect(r.first['test']).to be_an_instance_of(DateTime)
-        end
-
-        it "should return Time when timestamp is > 2038-01-19T03:14:07" do
-          r = @client.query("SELECT CAST('2038-01-19 03:14:08' AS DATETIME) as test")
-          expect(r.first['test']).to be_an_instance_of(Time)
-        end
-      else
-        it "should return Time when timestamp is < 1901-12-13 20:45:52" do
-          r = @client.query("SELECT CAST('1901-12-13 20:45:51' AS DATETIME) as test")
-          expect(r.first['test']).to be_an_instance_of(Time)
-        end
-
-        it "should return Time when timestamp is > 2038-01-19T03:14:07" do
-          r = @client.query("SELECT CAST('2038-01-19 03:14:08' AS DATETIME) as test")
-          expect(r.first['test']).to be_an_instance_of(Time)
-        end
-      end
+    it "should return Time when timestamp is > 2038-01-19T03:14:07" do
+      r = @client.prepare("SELECT CAST('2038-01-19 03:14:08' AS DATETIME) as test").execute
+      expect(r.first['test']).to be_an_instance_of(Time)
     end
 
     it "should return Time for a TIMESTAMP value when within the supported range" do
@@ -524,14 +493,12 @@ RSpec.describe Mysql2::Statement do
     end
 
     context "string encoding for ENUM values" do
-      before { pending('Encoding is undefined') unless defined?(Encoding) }
-
       it "should default to the connection's encoding if Encoding.default_internal is nil" do
         with_internal_encoding nil do
           result = @client.query("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1").first
           expect(result['enum_test'].encoding).to eql(Encoding::UTF_8)
 
-          client2 = new_client(:encoding => 'ascii')
+          client2 = new_client(encoding: 'ascii')
           result = client2.query("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1").first
           expect(result['enum_test'].encoding).to eql(Encoding::US_ASCII)
         end
@@ -556,14 +523,12 @@ RSpec.describe Mysql2::Statement do
     end
 
     context "string encoding for SET values" do
-      before { pending('Encoding is undefined') unless defined?(Encoding) }
-
       it "should default to the connection's encoding if Encoding.default_internal is nil" do
         with_internal_encoding nil do
           result = @client.query("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1").first
           expect(result['set_test'].encoding).to eql(Encoding::UTF_8)
 
-          client2 = new_client(:encoding => 'ascii')
+          client2 = new_client(encoding: 'ascii')
           result = client2.query("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1").first
           expect(result['set_test'].encoding).to eql(Encoding::US_ASCII)
         end
@@ -588,8 +553,6 @@ RSpec.describe Mysql2::Statement do
     end
 
     context "string encoding for BINARY values" do
-      before { pending('Encoding is undefined') unless defined?(Encoding) }
-
       it "should default to binary if Encoding.default_internal is nil" do
         with_internal_encoding nil do
           result = @client.query("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1").first
@@ -629,9 +592,7 @@ RSpec.describe Mysql2::Statement do
       end
 
       context "string encoding for #{type} values" do
-        before { pending('Encoding is undefined') unless defined?(Encoding) }
-
-        if %w(VARBINARY TINYBLOB BLOB MEDIUMBLOB LONGBLOB).include?(type)
+        if %w[VARBINARY TINYBLOB BLOB MEDIUMBLOB LONGBLOB].include?(type)
           it "should default to binary if Encoding.default_internal is nil" do
             with_internal_encoding nil do
               result = @client.query("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1").first
@@ -656,7 +617,7 @@ RSpec.describe Mysql2::Statement do
               result = @client.query("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1").first
               expect(result[field].encoding).to eql(Encoding::UTF_8)
 
-              client2 = new_client(:encoding => 'ascii')
+              client2 = new_client(encoding: 'ascii')
               result = client2.query("SELECT * FROM mysql2_test ORDER BY id DESC LIMIT 1").first
               expect(result[field].encoding).to eql(Encoding::US_ASCII)
             end
@@ -718,7 +679,6 @@ RSpec.describe Mysql2::Statement do
 
     it 'should return number of rows affected by an insert' do
       stmt = @client.prepare 'INSERT INTO lastIdTest (blah) VALUES (?)'
-      expect(stmt.affected_rows).to eq 0
       stmt.execute 1
       expect(stmt.affected_rows).to eq 1
     end
@@ -751,7 +711,9 @@ RSpec.describe Mysql2::Statement do
   context 'close' do
     it 'should free server resources' do
       stmt = @client.prepare 'SELECT 1'
+      GC.disable
       expect { stmt.close }.to change(&method(:stmt_count)).by(-1)
+      GC.enable
     end
 
     it 'should raise an error on subsequent execution' do

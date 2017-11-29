@@ -1,3 +1,5 @@
+# encoding: UTF-8
+
 module Mysql2
-  VERSION = "0.4.10.latin1utf8"
+  VERSION = "0.4.11.latin1utf8"
 end
