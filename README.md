@@ -17,7 +17,7 @@ The Mysql2 gem is meant to serve the extremely common use-case of connecting, qu
 Some database libraries out there serve as direct 1:1 mappings of the already complex C APIs available.
 This one is not.
 
-It also forces the use of UTF-8 [or binary] for the connection [and all strings in 1.9, unless Encoding.default_internal is set then it'll convert from UTF-8 to that encoding] and uses encoding-aware MySQL API calls where it can.
+It also forces the use of UTF-8 [or binary] for the connection and uses encoding-aware MySQL API calls where it can.
 
 The API consists of three classes:
 
@@ -185,7 +185,8 @@ end
 Prepared statements are supported, as well. In a prepared statement, use a `?`
 in place of each value and then execute the statement to retrieve a result set.
 Pass your arguments to the execute method in the same number and order as the
-question marks in the statement.
+question marks in the statement. Query options can be passed as keyword arguments
+to the execute method.
 
 ``` ruby
 statement = @client.prepare("SELECT * FROM users WHERE login_count = ?")
@@ -194,6 +195,9 @@ result2 = statement.execute(2)
 
 statement = @client.prepare("SELECT * FROM users WHERE last_login >= ? AND location LIKE ?")
 result = statement.execute(1, "CA")
+
+statement = @client.prepare("SELECT * FROM users WHERE last_login >= ? AND location LIKE ?")
+result = statement.execute(1, "CA", :as => :array)
 ```
 
 ## Connection options
@@ -392,6 +396,15 @@ c = Mysql2::Client.new
 c.query(sql, :symbolize_keys => true)
 ```
 
+or
+
+``` ruby
+# this will set the options for the Mysql2::Result instance returned from the #execute method
+c = Mysql2::Client.new
+s = c.prepare(sql)
+s.execute(arg1, args2, :symbolize_keys => true)
+```
+
 ## Result types
 
 ### Array of Arrays
@@ -520,7 +533,7 @@ As for field values themselves, I'm workin on it - but expect that soon.
 
 This gem is tested with the following Ruby versions on Linux and Mac OS X:
 
- * Ruby MRI 1.9.3, 2.0.0, 2.1.x, 2.2.x, 2.3.x, 2.4.x
+ * Ruby MRI 2.0.0, 2.1.x, 2.2.x, 2.3.x, 2.4.x, 2.5.x
  * Rubinius 2.x and 3.x do work but may fail under some workloads
 
 This gem is tested with the following MySQL and MariaDB versions:
