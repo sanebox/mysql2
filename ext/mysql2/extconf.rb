@@ -52,6 +52,13 @@ GLOB = "{#{dirs.join(',')}}/{mysql_config,mysql_config5,mariadb_config}".freeze
 # If the user has provided a --with-mysql-dir argument, we must respect it or fail.
 inc, lib = dir_config('mysql')
 if inc && lib
+  # Ruby versions below 2.0 on Unix and below 2.1 on Windows
+  # do not properly search for lib directories, and must be corrected:
+  # https://bugs.ruby-lang.org/projects/ruby-trunk/repository/revisions/39717
+  unless lib && lib[-3, 3] == 'lib'
+    @libdir_basename = 'lib'
+    inc, lib = dir_config('mysql')
+  end
   abort "-----\nCannot find include dir(s) #{inc}\n-----" unless inc && inc.split(File::PATH_SEPARATOR).any? { |dir| File.directory?(dir) }
   abort "-----\nCannot find library dir(s) #{lib}\n-----" unless lib && lib.split(File::PATH_SEPARATOR).any? { |dir| File.directory?(dir) }
   warn "-----\nUsing --with-mysql-dir=#{File.dirname inc}\n-----"
@@ -98,12 +105,18 @@ mysql_h = [prefix, 'mysql.h'].compact.join('/')
 add_ssl_defines(mysql_h)
 have_struct_member('MYSQL', 'net.vio', mysql_h)
 have_struct_member('MYSQL', 'net.pvio', mysql_h)
+
 # These constants are actually enums, so they cannot be detected by #ifdef in C code.
 have_const('MYSQL_ENABLE_CLEARTEXT_PLUGIN', mysql_h)
 have_const('SERVER_QUERY_NO_GOOD_INDEX_USED', mysql_h)
 have_const('SERVER_QUERY_NO_INDEX_USED', mysql_h)
 have_const('SERVER_QUERY_WAS_SLOW', mysql_h)
-have_const('MYSQL_OPT_CONNECT_ATTR_ADD', mysql_h) # for mysql_options4
+have_const('MYSQL_OPTION_MULTI_STATEMENTS_ON', mysql_h)
+have_const('MYSQL_OPTION_MULTI_STATEMENTS_OFF', mysql_h)
+
+# my_bool is replaced by C99 bool in MySQL 8.0, but we want
+# to retain compatibility with the typedef in earlier MySQLs.
+have_type('my_bool', mysql_h)
 
 # This is our wishlist. We use whichever flags work on the host.
 # -Wall and -Wextra are included by default.

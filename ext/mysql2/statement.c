@@ -1,7 +1,7 @@
 #include <mysql2_ext.h>
 
-VALUE cMysql2Statement;
-extern VALUE mMysql2, cMysql2Error, cMysql2TimeoutError, cBigDecimal, cDateTime, cDate;
+extern VALUE mMysql2, cMysql2Error;
+static VALUE cMysql2Statement, cBigDecimal, cDateTime, cDate;
 static VALUE sym_stream, intern_new_with_args, intern_each, intern_to_s, intern_merge_bang;
 static VALUE intern_sec_fraction, intern_usec, intern_sec, intern_min, intern_hour, intern_day, intern_month, intern_year;
 
@@ -115,7 +115,7 @@ VALUE rb_mysql_stmt_new(VALUE rb_client, VALUE sql) {
 
   // set STMT_ATTR_UPDATE_MAX_LENGTH attr
   {
-    bool truth = 1;
+    my_bool truth = 1;
     if (mysql_stmt_attr_set(stmt_wrapper->stmt, STMT_ATTR_UPDATE_MAX_LENGTH, &truth)) {
       rb_raise(cMysql2Error, "Unable to initialize prepared statement: set STMT_ATTR_UPDATE_MAX_LENGTH");
     }
@@ -184,7 +184,7 @@ static void set_buffer_for_string(MYSQL_BIND* bind_buffer, unsigned long *length
  * the buffer is a Ruby string pointer and not our memory to manage.
  */
 #define FREE_BINDS                                          \
-  for (i = 0; i < c; i++) {                                 \
+  for (i = 0; i < bind_count; i++) {                        \
     if (bind_buffers[i].buffer && NIL_P(params_enc[i])) {   \
       xfree(bind_buffers[i].buffer);                        \
     }                                                       \
@@ -247,14 +247,13 @@ static VALUE rb_mysql_stmt_execute(int argc, VALUE *argv, VALUE self) {
   MYSQL_BIND *bind_buffers = NULL;
   unsigned long *length_buffers = NULL;
   unsigned long bind_count;
-  long i;
-  int c;
+  unsigned long i;
   MYSQL_STMT *stmt;
   MYSQL_RES *metadata;
   VALUE opts;
   VALUE current;
   VALUE resultObj;
-  VALUE *params_enc;
+  VALUE *params_enc = NULL;
   int is_streaming;
   rb_encoding *conn_enc;
 
@@ -263,24 +262,26 @@ static VALUE rb_mysql_stmt_execute(int argc, VALUE *argv, VALUE self) {
 
   conn_enc = rb_to_encoding(wrapper->encoding);
 
-  // Get count of ordinary arguments, and extract hash opts/keyword arguments
-  c = rb_scan_args(argc, argv, "*:", NULL, &opts);
-
   stmt = stmt_wrapper->stmt;
-
   bind_count = mysql_stmt_param_count(stmt);
-  if (c != (long)bind_count) {
-    rb_raise(cMysql2Error, "Bind parameter count (%ld) doesn't match number of arguments (%d)", bind_count, c);
+
+  // Get count of ordinary arguments, and extract hash opts/keyword arguments
+  // Use a local scope to avoid leaking the temporary count variable
+  {
+    int c = rb_scan_args(argc, argv, "*:", NULL, &opts);
+    if (c != (long)bind_count) {
+      rb_raise(cMysql2Error, "Bind parameter count (%ld) doesn't match number of arguments (%d)", bind_count, c);
+    }
   }
 
   // setup any bind variables in the query
   if (bind_count > 0) {
     // Scratch space for string encoding exports, allocate on the stack
-    params_enc = alloca(sizeof(VALUE) * c);
+    params_enc = alloca(sizeof(VALUE) * bind_count);
     bind_buffers = xcalloc(bind_count, sizeof(MYSQL_BIND));
     length_buffers = xcalloc(bind_count, sizeof(unsigned long));
 
-    for (i = 0; i < c; i++) {
+    for (i = 0; i < bind_count; i++) {
       bind_buffers[i].buffer = NULL;
       params_enc[i] = Qnil;
 
@@ -547,8 +548,11 @@ static VALUE rb_mysql_stmt_close(VALUE self) {
 }
 
 void init_mysql2_statement() {
-  cMysql2Statement = rb_define_class_under(mMysql2, "Statement", rb_cObject);
+  cDate = rb_const_get(rb_cObject, rb_intern("Date"));
+  cDateTime = rb_const_get(rb_cObject, rb_intern("DateTime"));
+  cBigDecimal = rb_const_get(rb_cObject, rb_intern("BigDecimal"));
 
+  cMysql2Statement = rb_define_class_under(mMysql2, "Statement", rb_cObject);
   rb_define_method(cMysql2Statement, "param_count", rb_mysql_stmt_param_count, 0);
   rb_define_method(cMysql2Statement, "field_count", rb_mysql_stmt_field_count, 0);
   rb_define_method(cMysql2Statement, "_execute", rb_mysql_stmt_execute, -1);

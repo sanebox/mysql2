@@ -6,6 +6,15 @@
 # Note that changes in the inspected code, or installation of new
 # versions of RuboCop, may require this file to be generated again.
 
+# Offense count: 3
+# Cop supports --auto-correct.
+# Configuration parameters: EnforcedStyle, SupportedStyles.
+# SupportedStyles: auto_detection, squiggly, active_support, powerpack, unindent
+Layout/IndentHeredoc:
+  Exclude:
+    - 'support/ruby_enc_to_mysql.rb'
+    - 'tasks/compile.rake'
+
 # Offense count: 2
 Metrics/AbcSize:
   Max: 90
@@ -13,7 +22,7 @@ Metrics/AbcSize:
 # Offense count: 31
 # Configuration parameters: CountComments, ExcludedMethods.
 Metrics/BlockLength:
-  Max: 825
+  Max: 850
 
 # Offense count: 1
 # Configuration parameters: CountBlocks.

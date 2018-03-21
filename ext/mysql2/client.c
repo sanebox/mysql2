@@ -114,7 +114,7 @@ static VALUE rb_set_ssl_mode_option(VALUE self, VALUE setting) {
   int val = NUM2INT( setting );
   if (version >= 50703 && version < 50711) {
     if (val == SSL_MODE_DISABLED || val == SSL_MODE_REQUIRED) {
-      bool b = ( val == SSL_MODE_REQUIRED );
+      my_bool b = ( val == SSL_MODE_REQUIRED );
       int result = mysql_options( wrapper->client, MYSQL_OPT_SSL_ENFORCE, &b );
       return INT2NUM(result);
     } else {
@@ -400,7 +400,7 @@ static VALUE rb_mysql_get_ssl_cipher(VALUE self)
   return rb_str;
 }
 
-#ifdef HAVE_CONST_MYSQL_OPT_CONNECT_ATTR_ADD
+#ifdef CLIENT_CONNECT_ATTRS
 static int opt_connect_attr_add_i(VALUE key, VALUE value, VALUE arg)
 {
   mysql_client_wrapper *wrapper = (mysql_client_wrapper *)arg;
@@ -428,7 +428,7 @@ static VALUE rb_mysql_connect(VALUE self, VALUE user, VALUE pass, VALUE host, VA
   args.mysql       = wrapper->client;
   args.client_flag = NUM2ULONG(flags);
 
-#ifdef HAVE_CONST_MYSQL_OPT_CONNECT_ATTR_ADD
+#ifdef CLIENT_CONNECT_ATTRS
   mysql_options(wrapper->client, MYSQL_OPT_CONNECT_ATTR_RESET, 0);
   rb_hash_foreach(conn_attrs, opt_connect_attr_add_i, (VALUE)wrapper);
 #endif
@@ -526,7 +526,7 @@ static VALUE do_send_query(void *args) {
  */
 static void *nogvl_read_query_result(void *ptr) {
   MYSQL * client = ptr;
-  bool res = mysql_read_query_result(client);
+  my_bool res = mysql_read_query_result(client);
 
   return (void *)(res == 0 ? Qtrue : Qfalse);
 }
@@ -846,7 +846,7 @@ static VALUE _mysql_client_options(VALUE self, int opt, VALUE value) {
   const void *retval = NULL;
   unsigned int intval = 0;
   const char * charval = NULL;
-  bool boolval;
+  my_bool boolval;
 
   GET_CLIENT(self);
 
@@ -1095,6 +1095,23 @@ static VALUE rb_mysql_client_ping(VALUE self) {
     return Qfalse;
   } else {
     return (VALUE)rb_thread_call_without_gvl(nogvl_ping, wrapper->client, RUBY_UBF_IO, 0);
+  }
+}
+
+/* call-seq:
+ *    client.set_server_option(value)
+ *
+ * Enables or disables an option for the connection.
+ * Read https://dev.mysql.com/doc/refman/5.7/en/mysql-set-server-option.html
+ * for more information.
+ */
+static VALUE rb_mysql_client_set_server_option(VALUE self, VALUE value) {
+  GET_CLIENT(self);
+
+  if (mysql_set_server_option(wrapper->client, NUM2INT(value)) == 0) {
+    return Qtrue;
+  } else {
+    return Qfalse;
   }
 }
 
@@ -1399,6 +1416,7 @@ void init_mysql2_client() {
   rb_define_method(cMysql2Client, "thread_id", rb_mysql_client_thread_id, 0);
   rb_define_method(cMysql2Client, "ping", rb_mysql_client_ping, 0);
   rb_define_method(cMysql2Client, "select_db", rb_mysql_client_select_db, 1);
+  rb_define_method(cMysql2Client, "set_server_option", rb_mysql_client_set_server_option, 1);
   rb_define_method(cMysql2Client, "more_results?", rb_mysql_client_more_results, 0);
   rb_define_method(cMysql2Client, "next_result", rb_mysql_client_next_result, 0);
   rb_define_method(cMysql2Client, "store_result", rb_mysql_client_store_result, 0);
@@ -1528,6 +1546,16 @@ void init_mysql2_client() {
   rb_const_set(cMysql2Client, rb_intern("SECURE_CONNECTION"), LONG2NUM(0));
 #endif
 
+#ifdef HAVE_CONST_MYSQL_OPTION_MULTI_STATEMENTS_ON
+  rb_const_set(cMysql2Client, rb_intern("OPTION_MULTI_STATEMENTS_ON"),
+      LONG2NUM(MYSQL_OPTION_MULTI_STATEMENTS_ON));
+#endif
+
+#ifdef HAVE_CONST_MYSQL_OPTION_MULTI_STATEMENTS_OFF
+  rb_const_set(cMysql2Client, rb_intern("OPTION_MULTI_STATEMENTS_OFF"),
+      LONG2NUM(MYSQL_OPTION_MULTI_STATEMENTS_OFF));
+#endif
+
 #ifdef CLIENT_MULTI_STATEMENTS
   rb_const_set(cMysql2Client, rb_intern("MULTI_STATEMENTS"),
       LONG2NUM(CLIENT_MULTI_STATEMENTS));
@@ -1556,6 +1584,16 @@ void init_mysql2_client() {
 #ifdef CLIENT_BASIC_FLAGS
   rb_const_set(cMysql2Client, rb_intern("BASIC_FLAGS"),
       LONG2NUM(CLIENT_BASIC_FLAGS));
+#endif
+
+#ifdef CLIENT_CONNECT_ATTRS
+  rb_const_set(cMysql2Client, rb_intern("CONNECT_ATTRS"),
+      LONG2NUM(CLIENT_CONNECT_ATTRS));
+#else
+  /* HACK because MySQL 5.5 and earlier don't define this constant,
+   * but we're using it in our default connection flags. */
+  rb_const_set(cMysql2Client, rb_intern("CONNECT_ATTRS"),
+      INT2NUM(0));
 #endif
 
 #if defined(FULL_SSL_MODE_SUPPORT) // MySQL 5.7.11 and above
