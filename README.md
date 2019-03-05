@@ -84,10 +84,11 @@ To see line numbers in backtraces, declare these environment variables
 
 ### Linux and other Unixes
 
-You may need to install a package such as `libmysqlclient-dev` or `mysql-devel`;
-refer to your distribution's package guide to find the particular package.
-The most common issue we see is a user who has the library file `libmysqlclient.so` but is
-missing the header file `mysql.h` -- double check that you have the _-dev_ packages installed.
+You may need to install a package such as `libmysqlclient-dev`, `mysql-devel`,
+or `default-libmysqlclient-dev`; refer to your distribution's package guide to
+find the particular package. The most common issue we see is a user who has
+the library file `libmysqlclient.so` but is missing the header file `mysql.h`
+-- double check that you have the _-dev_ packages installed.
 
 ### Mac OS X
 
@@ -166,7 +167,7 @@ end
 How about with symbolized keys?
 
 ``` ruby
-client.query("SELECT * FROM users WHERE group='githubbers'", :symbolize_keys => true) do |row|
+client.query("SELECT * FROM users WHERE group='githubbers'", :symbolize_keys => true).each do |row|
   # do something with row, it's ready to rock
 end
 ```
@@ -187,6 +188,9 @@ in place of each value and then execute the statement to retrieve a result set.
 Pass your arguments to the execute method in the same number and order as the
 question marks in the statement. Query options can be passed as keyword arguments
 to the execute method.
+
+Be sure to read about the known limitations of prepared statements at
+https://dev.mysql.com/doc/refman/5.6/en/c-api-prepared-statement-problems.html
 
 ``` ruby
 statement = @client.prepare("SELECT * FROM users WHERE login_count = ?")
@@ -224,6 +228,7 @@ Mysql2::Client.new(
   :ssl_mode = :disabled / :preferred / :required / :verify_ca / :verify_identity,
   :default_file = '/path/to/my.cfg',
   :default_group = 'my.cfg section',
+  :default_auth = 'authentication_windows_client'
   :init_command => sql
   )
 ```
@@ -544,6 +549,7 @@ This gem is tested with the following MySQL and MariaDB versions:
 
 ### Ruby on Rails / Active Record
 
+ * mysql2 0.5.x works with Rails / Active Record 5.0.7, 5.1.6, and higher.
  * mysql2 0.4.x works with Rails / Active Record 4.2.5 - 5.0 and higher.
  * mysql2 0.3.x works with Rails / Active Record 3.1, 3.2, 4.x, 5.0.
  * mysql2 0.2.x works with Rails / Active Record 2.3 - 3.0.
