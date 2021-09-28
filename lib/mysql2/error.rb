@@ -52,7 +52,7 @@ module Mysql2
     def initialize(msg, server_version = nil, error_number = nil, sql_state = nil)
       @server_version = server_version
       @error_number = error_number
-      @sql_state = sql_state ? sql_state.encode(ENCODE_OPTS) : nil
+      @sql_state = sql_state ? sql_state.encode(**ENCODE_OPTS) : nil
 
       super(clean_message(msg))
     end
