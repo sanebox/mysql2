@@ -91,9 +91,9 @@ module Mysql2
     # Returns a valid UTF-8 string.
     def clean_message(message)
       if @server_version && @server_version > 50500
-        message.encode(ENCODE_OPTS)
+        message.encode(**ENCODE_OPTS)
       else
-        message.encode(Encoding::UTF_8, ENCODE_OPTS)
+        message.encode(Encoding::UTF_8, **ENCODE_OPTS)
       end
     end
   end
